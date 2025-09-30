@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use dashmap::DashMap;
 use log::debug;
-use nrs_language_server::completion::completion;
-use nrs_language_server::nrs_lang::{
-    parse, type_inference, Ast, ImCompleteSemanticToken, ParserResult,
+use manifold_language_server::manifold_extract::{
+    extract_manifold_content, ExtractType, ManifoldExtract,
 };
-use nrs_language_server::semantic_analyze::{analyze_program, IdentType, Semantic};
-use nrs_language_server::semantic_token::LEGEND_TYPE;
-use nrs_language_server::span::Span;
+use manifold_language_server::manifold_lang::ImCompleteSemanticToken;
+use manifold_language_server::semantic_analyze::{IdentType, Semantic};
+use manifold_language_server::semantic_token::LEGEND_TYPE;
+use manifold_language_server::span::Span;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,7 +19,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 #[derive(Debug)]
 struct Backend {
     client: Client,
-    ast_map: DashMap<String, Ast>,
+    manifold_extracts_map: DashMap<String, Vec<ManifoldExtract>>,
     semantic_map: DashMap<String, Semantic>,
     document_map: DashMap<String, Rope>,
     semantic_token_map: DashMap<String, Vec<ImCompleteSemanticToken>>,
@@ -67,11 +67,23 @@ impl LanguageServer for Backend {
                         SemanticTokensRegistrationOptions {
                             text_document_registration_options: {
                                 TextDocumentRegistrationOptions {
-                                    document_selector: Some(vec![DocumentFilter {
-                                        language: Some("nrs".to_string()),
-                                        scheme: Some("file".to_string()),
-                                        pattern: None,
-                                    }]),
+                                    document_selector: Some(vec![
+                                        DocumentFilter {
+                                            language: Some("html".to_string()),
+                                            scheme: Some("file".to_string()),
+                                            pattern: None,
+                                        },
+                                        DocumentFilter {
+                                            language: Some("xml".to_string()),
+                                            scheme: Some("file".to_string()),
+                                            pattern: None,
+                                        },
+                                        DocumentFilter {
+                                            language: None,
+                                            scheme: Some("file".to_string()),
+                                            pattern: Some("**/*.html".to_string()),
+                                        },
+                                    ]),
                                 }
                             },
                             semantic_tokens_options: SemanticTokensOptions {
@@ -297,109 +309,101 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<InlayHint>>> {
         debug!("inlay hint");
         let uri = &params.text_document.uri;
-        let mut hashmap = HashMap::new();
-        if let Some(ast) = self.ast_map.get(uri.as_str()) {
-            ast.iter().for_each(|(func, _)| {
-                type_inference(&func.body, &mut hashmap);
-            });
+
+        if let Some(manifold_extracts) = self.manifold_extracts_map.get(uri.as_str()) {
+            // Provide type hints for Manifold expressions
+            let mut hints = Vec::new();
+
+            for extract in manifold_extracts.iter() {
+                match &extract.extract_type {
+                    ExtractType::Interpolation => {
+                        // Add type hints for interpolation expressions
+                        // For now, just show the expression type
+                        hints.push(InlayHint {
+                            position: extract.range.end,
+                            label: InlayHintLabel::String(" (expr)".to_string()),
+                            kind: Some(InlayHintKind::TYPE),
+                            text_edits: None,
+                            tooltip: Some(InlayHintTooltip::String(
+                                "Manifold interpolation expression".to_string(),
+                            )),
+                            padding_left: Some(true),
+                            padding_right: Some(false),
+                            data: None,
+                        });
+                    }
+                    ExtractType::Directive { attribute_name } => {
+                        // Add type hints for directive expressions
+                        if matches!(attribute_name.as_str(), "if" | "elif" | "show" | "hide") {
+                            hints.push(InlayHint {
+                                position: extract.range.end,
+                                label: InlayHintLabel::String(" (boolean)".to_string()),
+                                kind: Some(InlayHintKind::TYPE),
+                                text_edits: None,
+                                tooltip: Some(InlayHintTooltip::String(
+                                    "Boolean expression".to_string(),
+                                )),
+                                padding_left: Some(true),
+                                padding_right: Some(false),
+                                data: None,
+                            });
+                        }
+                    }
+                    _ => {
+                        // No hints for data attributes for now
+                    }
+                }
+            }
+
+            return Ok(Some(hints));
         }
 
-        let document = match self.document_map.get(uri.as_str()) {
-            Some(rope) => rope,
-            None => return Ok(None),
-        };
-        let inlay_hint_list = hashmap
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k.start,
-                    k.end,
-                    match v {
-                        nrs_language_server::nrs_lang::Value::Null => "null".to_string(),
-                        nrs_language_server::nrs_lang::Value::Bool(_) => "bool".to_string(),
-                        nrs_language_server::nrs_lang::Value::Num(_) => "number".to_string(),
-                        nrs_language_server::nrs_lang::Value::Str(_) => "string".to_string(),
-                    },
-                )
-            })
-            .filter_map(|item| {
-                // let start_position = offset_to_position(item.0, document)?;
-                let end_position = offset_to_position(item.1, &document)?;
-                let inlay_hint = InlayHint {
-                    text_edits: None,
-                    tooltip: None,
-                    kind: Some(InlayHintKind::TYPE),
-                    padding_left: None,
-                    padding_right: None,
-                    data: None,
-                    position: end_position,
-                    label: InlayHintLabel::LabelParts(vec![InlayHintLabelPart {
-                        value: item.2,
-                        tooltip: None,
-                        location: Some(Location {
-                            uri: params.text_document.uri.clone(),
-                            range: Range {
-                                start: Position::new(0, 4),
-                                end: Position::new(0, 10),
-                            },
-                        }),
-                        command: None,
-                    }]),
-                };
-                Some(inlay_hint)
-            })
-            .collect::<Vec<_>>();
-
-        Ok(Some(inlay_hint_list))
+        Ok(None)
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
+
         let completions = || -> Option<Vec<CompletionItem>> {
             let rope = self.document_map.get(&uri.to_string())?;
-            let ast = self.ast_map.get(&uri.to_string())?;
-            let char = rope.try_line_to_char(position.line as usize).ok()?;
-            let offset = char + position.character as usize;
-            let completions = completion(&ast, offset);
-            let mut ret = Vec::with_capacity(completions.len());
-            for (_, item) in completions {
-                match item {
-                    nrs_language_server::completion::ImCompleteCompletionItem::Variable(var) => {
-                        ret.push(CompletionItem {
-                            label: var.clone(),
-                            insert_text: Some(var.clone()),
-                            kind: Some(CompletionItemKind::VARIABLE),
-                            detail: Some(var),
-                            ..Default::default()
-                        });
-                    }
-                    nrs_language_server::completion::ImCompleteCompletionItem::Function(
-                        name,
-                        args,
-                    ) => {
-                        ret.push(CompletionItem {
-                            label: name.clone(),
-                            kind: Some(CompletionItemKind::FUNCTION),
-                            detail: Some(name.clone()),
-                            insert_text: Some(format!(
-                                "{}({})",
-                                name,
-                                args.iter()
-                                    .enumerate()
-                                    .map(|(index, item)| { format!("${{{}:{}}}", index + 1, item) })
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            )),
-                            insert_text_format: Some(InsertTextFormat::SNIPPET),
-                            ..Default::default()
-                        });
-                    }
+            let manifold_extracts = self.manifold_extracts_map.get(&uri.to_string())?;
+
+            let line_char = rope.try_line_to_char(position.line as usize).ok()?;
+            let offset = line_char + position.character as usize;
+
+            // Check if we're inside a Manifold extract
+            for extract in manifold_extracts.iter() {
+                let extract_start_offset = rope
+                    .try_line_to_char(extract.range.start.line as usize)
+                    .ok()?
+                    + extract.range.start.character as usize;
+                let extract_end_offset = rope
+                    .try_line_to_char(extract.range.end.line as usize)
+                    .ok()?
+                    + extract.range.end.character as usize;
+
+                if offset >= extract_start_offset && offset <= extract_end_offset {
+                    // We're inside a Manifold extract - provide context-specific completions
+                    return Some(get_manifold_completions(&extract.extract_type));
                 }
             }
-            Some(ret)
-        }();
-        Ok(completions.map(CompletionResponse::Array))
+
+            // Check if we're in a position to add Manifold directives (within a tag)
+            let line = rope.line(position.line as usize).to_string();
+            if line.contains('<') && !line.trim_start().starts_with("</") {
+                // We're potentially in a tag - provide directive completions
+                return Some(get_directive_completions());
+            }
+
+            None
+        };
+
+        if let Some(items) = completions() {
+            Ok(Some(CompletionResponse::Array(items)))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -475,84 +479,92 @@ struct TextDocumentItem<'a> {
 
 impl Backend {
     async fn on_change<'a>(&self, params: TextDocumentItem<'a>) {
-        dbg!(&params.version);
+        debug!("Processing document change for: {}", params.uri);
         let rope = ropey::Rope::from_str(params.text);
         self.document_map
             .insert(params.uri.to_string(), rope.clone());
-        let ParserResult {
-            ast,
-            parse_errors,
-            semantic_tokens,
-        } = parse(params.text);
-        let mut diagnostics = parse_errors
-            .into_iter()
-            .filter_map(|item| {
-                let (message, span) = match item.reason() {
-                    chumsky::error::SimpleReason::Unclosed { span, delimiter } => {
-                        (format!("Unclosed delimiter {delimiter}"), span.clone())
+
+        // Extract only Manifold-specific content instead of parsing the entire HTML
+        let manifold_extracts = extract_manifold_content(params.text);
+        self.manifold_extracts_map
+            .insert(params.uri.to_string(), manifold_extracts.clone());
+
+        // Only create diagnostics for Manifold-specific syntax errors, not HTML errors
+        let mut diagnostics = Vec::new();
+
+        // Validate each Manifold extract individually
+        for extract in &manifold_extracts {
+            match &extract.extract_type {
+                ExtractType::Interpolation => {
+                    // Validate JavaScript expression syntax in interpolations
+                    if extract.content.trim().is_empty() {
+                        diagnostics.push(Diagnostic::new_simple(
+                            extract.range,
+                            "Empty interpolation expression".to_string(),
+                        ));
                     }
-                    chumsky::error::SimpleReason::Unexpected => (
-                        format!(
-                            "{}, expected {}",
-                            if item.found().is_some() {
-                                "Unexpected token in input"
-                            } else {
-                                "Unexpected end of input"
-                            },
-                            if item.expected().len() == 0 {
-                                "something else".to_string()
-                            } else {
-                                item.expected()
-                                    .map(|expected| match expected {
-                                        Some(expected) => expected.to_string(),
-                                        None => "end of input".to_string(),
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
+                    // Add more JavaScript expression validation here if needed
+                }
+                ExtractType::Directive { attribute_name } => {
+                    // Validate directive-specific syntax
+                    match attribute_name.as_str() {
+                        "if" | "elif" => {
+                            if extract.content.trim().is_empty() {
+                                diagnostics.push(Diagnostic::new_simple(
+                                    extract.range,
+                                    "Conditional directive requires an expression".to_string(),
+                                ));
                             }
-                        ),
-                        item.span(),
-                    ),
-                    chumsky::error::SimpleReason::Custom(msg) => (msg.to_string(), item.span()),
-                };
-
-                let start_position = offset_to_position(span.start, &rope)?;
-                let end_position = offset_to_position(span.end, &rope)?;
-                Some(Diagnostic::new_simple(
-                    Range::new(start_position, end_position),
-                    message,
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        if let Some(ast) = ast {
-            match analyze_program(&ast) {
-                Ok(semantic) => {
-                    self.semantic_map.insert(params.uri.to_string(), semantic);
-                }
-                Err(err) => {
-                    self.semantic_token_map.remove(&params.uri.to_string());
-                    let span = err.span();
-                    let start_position = offset_to_position(span.start, &rope);
-                    let end_position = offset_to_position(span.end, &rope);
-                    let diag = start_position
-                        .and_then(|start| end_position.map(|end| (start, end)))
-                        .map(|(start, end)| {
-                            Diagnostic::new_simple(Range::new(start, end), format!("{err:?}"))
-                        });
-                    if let Some(diag) = diag {
-                        diagnostics.push(diag);
+                        }
+                        "each" => {
+                            if !extract.content.contains(" as ") {
+                                diagnostics.push(Diagnostic::new_simple(
+                                    extract.range,
+                                    "Each directive requires 'items as item' syntax".to_string(),
+                                ));
+                            }
+                        }
+                        _ => {
+                            // Other directives - basic validation
+                            if extract.content.trim().is_empty()
+                                && !matches!(attribute_name.as_str(), "else")
+                            {
+                                diagnostics.push(Diagnostic::new_simple(
+                                    extract.range,
+                                    format!("Directive '{}' requires a value", attribute_name),
+                                ));
+                            }
+                        }
                     }
                 }
-            };
-            self.ast_map.insert(params.uri.to_string(), ast);
+                ExtractType::DataAttribute { attribute_name } => {
+                    // Validate data-mf attributes
+                    if attribute_name == "data-mf-register" && !extract.content.is_empty() {
+                        // Validate context name if provided
+                        if !extract
+                            .content
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                        {
+                            diagnostics.push(Diagnostic::new_simple(
+                                extract.range,
+                                "Context name should contain only alphanumeric characters, underscores, and hyphens".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
+        // Send only Manifold-specific diagnostics
         self.client
             .publish_diagnostics(params.uri.clone(), diagnostics, params.version)
             .await;
-        self.semantic_token_map
-            .insert(params.uri.to_string(), semantic_tokens);
+
+        debug!(
+            "Document processing complete. Found {} Manifold extracts",
+            manifold_extracts.len()
+        );
     }
 }
 
@@ -565,7 +577,7 @@ async fn main() {
 
     let (service, socket) = LspService::build(|client| Backend {
         client,
-        ast_map: DashMap::new(),
+        manifold_extracts_map: DashMap::new(),
         document_map: DashMap::new(),
         semantic_token_map: DashMap::new(),
         semantic_map: DashMap::new(),
@@ -573,6 +585,105 @@ async fn main() {
     .finish();
 
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+fn get_manifold_completions(extract_type: &ExtractType) -> Vec<CompletionItem> {
+    let mut completions = Vec::new();
+
+    match extract_type {
+        ExtractType::Interpolation => {
+            // Provide JavaScript expression completions
+            completions.extend([
+                CompletionItem {
+                    label: "console.log".to_string(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some("Console logging function".to_string()),
+                    insert_text: Some("console.log($0)".to_string()),
+                    insert_text_format: Some(InsertTextFormat::SNIPPET),
+                    ..Default::default()
+                },
+                CompletionItem {
+                    label: "length".to_string(),
+                    kind: Some(CompletionItemKind::PROPERTY),
+                    detail: Some("Array/string length property".to_string()),
+                    ..Default::default()
+                },
+            ]);
+        }
+        ExtractType::Directive { .. } => {
+            // Provide common directive expressions
+            completions.extend([
+                CompletionItem {
+                    label: "true".to_string(),
+                    kind: Some(CompletionItemKind::VALUE),
+                    detail: Some("Boolean true".to_string()),
+                    ..Default::default()
+                },
+                CompletionItem {
+                    label: "false".to_string(),
+                    kind: Some(CompletionItemKind::VALUE),
+                    detail: Some("Boolean false".to_string()),
+                    ..Default::default()
+                },
+            ]);
+        }
+        ExtractType::DataAttribute { .. } => {
+            // No specific completions for data attributes yet
+        }
+    }
+
+    completions
+}
+
+fn get_directive_completions() -> Vec<CompletionItem> {
+    vec![
+        CompletionItem {
+            label: ":if".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Conditional rendering directive".to_string()),
+            insert_text: Some(":if=\"$0\"".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: ":each".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("List iteration directive".to_string()),
+            insert_text: Some(":each=\"${1:items} as ${2:item}$0\"".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: ":onclick".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Click event handler".to_string()),
+            insert_text: Some(":onclick=\"$0\"".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: ":sync:value".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Two-way value binding".to_string()),
+            insert_text: Some(":sync:value=\"$0\"".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "data-mf-register".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Register Manifold context".to_string()),
+            insert_text: Some("data-mf-register=\"$0\"".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "data-mf-ignore".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Ignore from Manifold processing".to_string()),
+            ..Default::default()
+        },
+    ]
 }
 
 fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {

@@ -1,12 +1,15 @@
 {
-	"name": "nrs-language-server",
-	"description": "nano rust language server",
+	"name": "manifold-language-server",
+	"description": "Language server for Manifold HTML framework",
 	"license": "MIT",
 	"version": "1.5.0",
 	"categories": [],
 	"keywords": [
 		"language-server",
-		"tower-lsp"
+		"tower-lsp",
+		"manifold",
+		"html",
+		"reactive"
 	],
 	"repository": {
 		"url": "https://github.com/IWANABETHATGUY/tower-lsp-boilerplate"
@@ -16,15 +19,22 @@
 	},
 	"enabledApiProposals": [],
 	"activationEvents": [
-		"onLanguage:nrs"
+		"onLanguage:html",
+		"onLanguage:manifold-html"
 	],
 	"main": "./dist/extension.js",
 	"contributes": {
 		"languages": [
 			{
-				"id": "nrs",
+				"id": "manifold-html",
+				"aliases": [
+					"Manifold HTML"
+				],
 				"extensions": [
-					".nrs"
+					".html"
+				],
+				"mimetypes": [
+					"text/html"
 				]
 			}
 		],

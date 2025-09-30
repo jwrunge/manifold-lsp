@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Manifold Example</title>
+		<script
+			type="module"
+			src="https://cdn.jsdelivr.net/npm/mfld@latest/dist/manifold.es.js"
+		></script>
+	</head>
+	<body data-mf-register>
+		<h1>Welcome to Manifold</h1>
+
+		<div>
+			<h2>Counter Example</h2>
+			<p>Count: ${count}</p>
+			<button :onclick="count++">Increment</button>
+			<button :onclick="count--">Decrement</button>
+
+			<div :if="count > 10">
+				<p>Wow, you've clicked a lot!</p>
+			</div>
+		</div>
+
+		<div>
+			<h2>List Example</h2>
+			<ul>
+				<li :each="items as item, index">${index}: ${item}</li>
+			</ul>
+		</div>
+
+		<div>
+			<h2>Form Example</h2>
+			<input :sync:value="username" placeholder="Enter your name" />
+			<p>Hello, ${username}!</p>
+		</div>
+
+		<div data-mf-ignore>
+			<p>This section is ignored by Manifold</p>
+			<div data-mf-register="isolated">
+				<p>This is an isolated Manifold context: ${isolatedVar}</p>
+			</div>
+		</div>
+
+		<script type="module">
+			import Manifold from "https://cdn.jsdelivr.net/npm/mfld@latest/dist/manifold.es.js";
+
+			const state = Manifold.create()
+				.add("count", 0)
+				.add("items", ["Apple", "Banana", "Cherry"])
+				.add("username", "World")
+				.build();
+
+			const isolatedState = Manifold.create("isolated")
+				.add("isolatedVar", "I'm isolated!")
+				.build();
+		</script>
+	</body>
+</html>

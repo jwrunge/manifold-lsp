@@ -1,23 +1,65 @@
-# boilerplate for a  rust language server powered by `tower-lsp` 
+# Manifold Language Server
 
-> [!note]
-> This repo use a language which is a very small subset of `rust` called `nano rust`
+A Language Server Protocol (LSP) implementation for the Manifold HTML framework, providing intelligent code completion, syntax highlighting, and error checking for Manifold's reactive HTML syntax.
 
-## A valid program in nano rust 
-```rust
-fn factorial(x) {
-    // Conditionals are supported!
-    if x == 0 {
-        1
-    } else {
-        x * factorial(x - 1)
-    }
-}
+## Features
 
-// The main function
-fn main() {
-    let three = 3;
-    let meaning_of_life = three * 14 + 1;
+-   **Syntax Highlighting**: Proper color coding for Manifold directives and interpolations
+-   **Code Completion**: Intelligent completions for Manifold directives, HTML elements, and attributes
+-   **Type Hints**: Type information for variables and expressions
+-   **Error Detection**: Real-time error reporting for invalid Manifold syntax
+-   **Go-to Definition**: Navigate to variable and function definitions
+-   **Hover Information**: Contextual information for Manifold elements
+
+## Manifold Syntax Support
+
+This language server supports the following Manifold features:
+
+### Directives
+
+-   `:if`, `:else`, `:elif` - Conditional rendering
+-   `:each` - List iteration
+-   `:sync:value`, `:sync:checked` - Two-way data binding
+-   `:onclick`, `:onchange`, etc. - Event handlers
+-   `:class`, `:style` - Dynamic styling
+-   `:show`, `:hide` - Visibility control
+
+### Data Attributes
+
+-   `data-mf-register` - Register a Manifold context
+-   `data-mf-ignore` - Exclude elements from Manifold processing
+
+### Text Interpolation
+
+-   `${}` expressions for dynamic text content
+-   Variable references and expressions within interpolations
+
+## Example Manifold HTML
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+	<body data-mf-register>
+		<h1>Todo App</h1>
+
+		<div>
+			<input :sync:value="newTodo" placeholder="Add a todo..." />
+			<button :onclick="addTodo()">Add</button>
+		</div>
+
+		<ul>
+			<li :each="todos as todo, index">
+				<span :class="{ completed: todo.done }">${todo.text}</span>
+				<button :onclick="toggleTodo(index)">Toggle</button>
+				<button :onclick="deleteTodo(index)">Delete</button>
+			</li>
+		</ul>
+
+		<p :if="todos.length === 0">No todos yet!</p>
+		<p :else>Total: ${todos.length} todos</p>
+	</body>
+</html>
+```
 
     print("Hello, world!");
     print("The meaning of life is...");
@@ -31,8 +73,10 @@ fn main() {
         // Function calling
         print(factorial(10));
     }
+
 }
-```
+
+````
 ## Introduction
 This repo is a template for `tower-lsp`, a useful github project template which makes writing new language servers easier.
 ## Development using VSCode
@@ -63,37 +107,31 @@ This repo use a language `nano rust` which first introduced by [ chumsky ](https
 - [x] InlayHint for LiteralType
 ![inlay hint](https://user-images.githubusercontent.com/17974631/156926412-c3823dac-664e-430e-96c1-c003a86eabb2.gif)
 
-- [x] semantic token   
+- [x] semantic token
 make sure your semantic token is enabled, you could enable your `semantic token` by
 adding this line  to your `settings.json`
 ```json
 {
  "editor.semanticHighlighting.enabled": true,
 }
-```
-- [x] syntactic error diagnostic
+````
+
+-   [x] syntactic error diagnostic
 
 https://user-images.githubusercontent.com/17974631/156926382-a1c4c911-7ea1-4d3a-8e08-3cf7271da170.mp4
 
-- [x] code completion  
+-   [x] code completion
 
 https://user-images.githubusercontent.com/17974631/156926355-010ef2cd-1d04-435b-bd1e-8b0dab9f44f1.mp4
 
-- [x] go to definition  
+-   [x] go to definition
 
 https://user-images.githubusercontent.com/17974631/156926103-94d90bd3-f31c-44e7-a2ce-4ddfde89bc33.mp4
 
-- [x] find reference
+-   [x] find reference
 
 https://user-images.githubusercontent.com/17974631/157367235-7091a36c-631a-4347-9c1e-a3b78db81714.mp4
 
-- [x] rename
+-   [x] rename
 
 https://user-images.githubusercontent.com/17974631/157367229-99903896-5583-4f67-a6da-1ae1cf206876.mp4
-
-
-
-
-
-
-

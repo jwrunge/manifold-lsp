@@ -1,108 +1,39 @@
 use std::collections::HashMap;
 
-use crate::nrs_lang::{Expr, Func, Spanned};
+use crate::manifold_lang::{ManifoldElement, Spanned};
+
 pub enum ImCompleteCompletionItem {
     Variable(String),
     Function(String, Vec<String>),
 }
-/// return (need_to_continue_search, founded reference)
+
+/// Legacy completion function - redirects to manifold_completion
 pub fn completion(
-    ast: &[Spanned<Func>],
+    ast: &[Spanned<ManifoldElement>],
     ident_offset: usize,
 ) -> HashMap<String, ImCompleteCompletionItem> {
-    let mut map = HashMap::new();
-    for (func, _) in ast.iter() {
-        if func.name.1.end < ident_offset {
-            map.insert(
-                func.name.0.clone(),
-                ImCompleteCompletionItem::Function(
-                    func.name.0.clone(),
-                    func.args
-                        .clone()
-                        .into_iter()
-                        .map(|(name, _)| name)
-                        .collect(),
-                ),
-            );
+    // Convert manifold completions to legacy format
+    let manifold_completions = crate::manifold_completion::completion(ast, ident_offset);
+    let mut legacy_completions = HashMap::new();
+
+    for (key, item) in manifold_completions {
+        match item {
+            crate::manifold_completion::ImCompleteCompletionItem::ManifoldVariable(name) => {
+                legacy_completions.insert(key, ImCompleteCompletionItem::Variable(name));
+            }
+            crate::manifold_completion::ImCompleteCompletionItem::ManifoldFunction(name, args) => {
+                legacy_completions.insert(key, ImCompleteCompletionItem::Function(name, args));
+            }
+            _ => {
+                // Convert other types to variables for legacy compatibility
+                legacy_completions.insert(key.clone(), ImCompleteCompletionItem::Variable(key));
+            }
         }
     }
 
-    // collect params variable
-    for (func, _) in ast.iter() {
-        if func.span.end > ident_offset && func.span.start < ident_offset {
-            // log::debug!("this is completion from body {}", name);
-            func.args.iter().for_each(|(item, _)| {
-                map.insert(
-                    item.clone(),
-                    ImCompleteCompletionItem::Variable(item.clone()),
-                );
-            });
-            get_completion_of(&func.body, &mut map, ident_offset);
-        }
-    }
-    map
-}
-
-pub fn get_completion_of(
-    expr: &Spanned<Expr>,
-    definition_map: &mut HashMap<String, ImCompleteCompletionItem>,
-    ident_offset: usize,
-) -> bool {
-    match &expr.0 {
-        Expr::Error => true,
-        Expr::Value(_) => true,
-        Expr::Local(local) => !(ident_offset >= local.1.start && ident_offset < local.1.end),
-        Expr::Let(name, lhs, rest, _name_span) => {
-            definition_map.insert(
-                name.clone(),
-                ImCompleteCompletionItem::Variable(name.clone()),
-            );
-            match get_completion_of(lhs, definition_map, ident_offset) {
-                true => get_completion_of(rest, definition_map, ident_offset),
-                false => false,
-            }
-        }
-        Expr::Then(first, second) => match get_completion_of(first, definition_map, ident_offset) {
-            true => get_completion_of(second, definition_map, ident_offset),
-            false => false,
-        },
-        Expr::Binary(lhs, _op, rhs) => match get_completion_of(lhs, definition_map, ident_offset) {
-            true => get_completion_of(rhs, definition_map, ident_offset),
-            false => false,
-        },
-        Expr::Call(callee, args) => {
-            match get_completion_of(callee, definition_map, ident_offset) {
-                true => {}
-                false => return false,
-            }
-            for expr in &args.0 {
-                match get_completion_of(expr, definition_map, ident_offset) {
-                    true => continue,
-                    false => return false,
-                }
-            }
-            true
-        }
-        Expr::If(test, consequent, alternative) => {
-            match get_completion_of(test, definition_map, ident_offset) {
-                true => {}
-                false => return false,
-            }
-            match get_completion_of(consequent, definition_map, ident_offset) {
-                true => {}
-                false => return false,
-            }
-            get_completion_of(alternative, definition_map, ident_offset)
-        }
-        Expr::Print(expr) => get_completion_of(expr, definition_map, ident_offset),
-        Expr::List(lst) => {
-            for expr in lst {
-                match get_completion_of(expr, definition_map, ident_offset) {
-                    true => continue,
-                    false => return false,
-                }
-            }
-            true
-        }
-    }
+    legacy_completions.insert(
+        "example".to_string(),
+        ImCompleteCompletionItem::Variable("example".to_string()),
+    );
+    legacy_completions
 }
