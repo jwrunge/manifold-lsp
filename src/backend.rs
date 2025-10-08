@@ -8,23 +8,74 @@ use tower_lsp::{
         DidOpenTextDocumentParams, ExecuteCommandOptions, ExecuteCommandParams, Hover,
         HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
         MarkupContent, MarkupKind, MessageType, Position, ServerCapabilities,
-        TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+        TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
     },
     Client, LanguageServer,
 };
 
 use super::attribute::ManifoldAttribute;
 use super::document::ManifoldDocument;
+use super::lineindex::LineIndex;
 use super::notification::{ManifoldNotification, NotificationParams};
 
+#[derive(Debug, Clone)]
+struct StoredDocument {
+    text: String,
+    parsed: ManifoldDocument,
+}
+
+impl StoredDocument {
+    fn new(text: String) -> Self {
+        let parsed = ManifoldDocument::parse(&text);
+        Self { text, parsed }
+    }
+
+    fn apply_content_changes(&mut self, changes: Vec<TextDocumentContentChangeEvent>) {
+        if changes.is_empty() {
+            return;
+        }
+
+        for change in changes {
+            if let Some(range) = change.range {
+                let line_index = LineIndex::new(&self.text);
+                let Some(start) = line_index.offset_at(&range.start) else {
+                    self.text = change.text;
+                    continue;
+                };
+                let Some(end) = line_index.offset_at(&range.end) else {
+                    self.text = change.text;
+                    continue;
+                };
+
+                if start <= end && end <= self.text.len() {
+                    self.text.replace_range(start..end, &change.text);
+                } else {
+                    self.text = change.text;
+                }
+            } else {
+                self.text = change.text;
+            }
+        }
+
+        self.parsed = ManifoldDocument::parse(&self.text);
+    }
+}
+
 pub struct Backend {
-    pub client: Client,
-    pub documents: DashMap<Url, ManifoldDocument>,
+    client: Client,
+    documents: DashMap<Url, StoredDocument>,
 }
 
 impl Backend {
+    pub fn new(client: Client) -> Self {
+        Self {
+            client,
+            documents: DashMap::new(),
+        }
+    }
+
     pub fn update_document(&self, uri: Url, text: String) {
-        let document = ManifoldDocument::parse(text);
+        let document = StoredDocument::new(text);
         self.documents.insert(uri, document);
     }
 
@@ -39,7 +90,7 @@ impl Backend {
     ) -> Option<ManifoldAttribute> {
         self.documents
             .get(uri)
-            .and_then(|doc| doc.manifold_attribute_at(position).cloned())
+            .and_then(|doc| doc.parsed.manifold_attribute_at(position).cloned())
     }
 
     pub async fn refresh_diagnostics(&self, uri: Url) {
@@ -48,6 +99,7 @@ impl Backend {
             .get(&uri)
             .map(|doc| {
                 let diagnostics = doc
+                    .parsed
                     .attributes
                     .iter()
                     .map(|attr| Diagnostic {
@@ -61,7 +113,7 @@ impl Backend {
                         ..Diagnostic::default()
                     })
                     .collect();
-                (diagnostics, doc.attributes.len())
+                (diagnostics, doc.parsed.attributes.len())
             })
             .unwrap_or_else(|| (Vec::new(), 0));
 
@@ -80,15 +132,12 @@ impl Backend {
 
 #[async_trait]
 impl LanguageServer for Backend {
-    /**
-     * Initialization and shutdown
-     */
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult, Error> {
         Ok(InitializeResult {
             server_info: None,
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                    TextDocumentSyncKind::INCREMENTAL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
@@ -105,9 +154,6 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    /**
-     * Document lifecycle handlers (open, change, close)
-     */
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         self.update_document(uri.clone(), params.text_document.text);
@@ -115,10 +161,35 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri;
-        if let Some(change) = params.content_changes.into_iter().last() {
-            self.update_document(uri.clone(), change.text);
+        let DidChangeTextDocumentParams {
+            text_document,
+            content_changes,
+        } = params;
+
+        let uri = text_document.uri;
+
+        if let Some(mut document) = self.documents.get_mut(&uri) {
+            document.apply_content_changes(content_changes);
+            drop(document);
             self.refresh_diagnostics(uri).await;
+            return;
+        }
+
+        if let Some(change) = content_changes.into_iter().last() {
+            if change.range.is_none() {
+                self.update_document(uri.clone(), change.text);
+                self.refresh_diagnostics(uri).await;
+            } else {
+                let _ = self
+                    .client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!(
+                            "Received incremental change for unopened document {uri}. Ignoring update."
+                        ),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -128,9 +199,6 @@ impl LanguageServer for Backend {
         self.client.publish_diagnostics(uri, vec![], None).await;
     }
 
-    /**
-     * Hover
-     */
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, Error> {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
@@ -154,9 +222,6 @@ impl LanguageServer for Backend {
         }
     }
 
-    /**
-     * Execute custom commands
-     */
     async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>, Error> {
         if params.command == "custom.notification" {
             self.client

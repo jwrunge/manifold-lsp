@@ -10,9 +10,9 @@ pub struct ManifoldDocument {
 }
 
 impl ManifoldDocument {
-    pub fn parse(text: String) -> Self {
-        let line_index = LineIndex::new(&text);
-        let attributes = Self::extract_manifold_attributes(&text, &line_index);
+    pub fn parse(text: &str) -> Self {
+        let line_index = LineIndex::new(text);
+        let attributes = Self::extract_manifold_attributes(text, &line_index);
         Self {
             attributes,
             line_index,

@@ -1,4 +1,3 @@
-use dashmap::DashMap;
 use tokio::{io, net::TcpListener};
 use tower_lsp::{LspService, Server};
 
@@ -16,10 +15,7 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let (service, socket) = LspService::new(|client| Backend {
-        client,
-        documents: DashMap::new(),
-    });
+    let (service, socket) = LspService::new(|client| Backend::new(client));
 
     if let Ok(addr) = std::env::var("MANIFOLD_LSP_TCP") {
         let listener = TcpListener::bind(addr).await.unwrap();
@@ -38,7 +34,7 @@ mod tests {
     use super::document::ManifoldDocument;
 
     fn attribute_names(source: &str) -> Vec<String> {
-        ManifoldDocument::parse(source.to_owned())
+        ManifoldDocument::parse(source)
             .attributes
             .into_iter()
             .map(|attr| attr.name)
