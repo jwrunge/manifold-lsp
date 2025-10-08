@@ -80,6 +80,9 @@ impl Backend {
 
 #[async_trait]
 impl LanguageServer for Backend {
+    /**
+     * Initialization and shutdown
+     */
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult, Error> {
         Ok(InitializeResult {
             server_info: None,
@@ -102,6 +105,9 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
+    /**
+     * Document lifecycle handlers (open, change, close)
+     */
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         self.update_document(uri.clone(), params.text_document.text);
@@ -122,6 +128,9 @@ impl LanguageServer for Backend {
         self.client.publish_diagnostics(uri, vec![], None).await;
     }
 
+    /**
+     * Hover
+     */
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, Error> {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
@@ -145,6 +154,9 @@ impl LanguageServer for Backend {
         }
     }
 
+    /**
+     * Execute custom commands
+     */
     async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>, Error> {
         if params.command == "custom.notification" {
             self.client
