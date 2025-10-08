@@ -13,7 +13,7 @@ use tower_lsp::{
     Client, LanguageServer,
 };
 
-use super::attribute::ManifoldAttribute;
+use super::attribute::{ManifoldAttribute, ManifoldAttributeKind};
 use super::document::ManifoldDocument;
 use super::lineindex::LineIndex;
 use super::notification::{ManifoldNotification, NotificationParams};
@@ -106,10 +106,16 @@ impl Backend {
                         range: attr.range.clone(),
                         severity: Some(DiagnosticSeverity::INFORMATION),
                         source: Some("manifold".to_string()),
-                        message: format!(
-                            "Manifold attribute `{}` recognized on a registered element",
-                            attr.name
-                        ),
+                        message: match attr.kind {
+                            ManifoldAttributeKind::Attribute => format!(
+                                "Manifold attribute `{}` recognized on a registered element",
+                                attr.name
+                            ),
+                            ManifoldAttributeKind::TextExpression => format!(
+                                "Manifold expression `{}` recognized inside a registered element",
+                                attr.name
+                            ),
+                        },
                         ..Diagnostic::default()
                     })
                     .collect();

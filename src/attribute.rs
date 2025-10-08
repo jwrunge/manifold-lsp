@@ -1,11 +1,18 @@
 use tower_lsp::lsp_types::Range;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifoldAttributeKind {
+    Attribute,
+    TextExpression,
+}
+
 #[derive(Debug, Clone)]
 pub struct ManifoldAttribute {
     pub name: String,
     pub range: Range,
     pub start_offset: usize,
     pub end_offset: usize,
+    pub kind: ManifoldAttributeKind,
 }
 
 #[derive(Debug)]
