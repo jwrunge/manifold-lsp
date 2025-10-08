@@ -236,6 +236,7 @@ dependencies = [
 name = "manifold-language-server"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
  "serde",
  "serde_json",
  "tokio",
