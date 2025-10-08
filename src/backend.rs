@@ -1,3 +1,4 @@
+use crate::expression::{parse_expression, ExpressionTokenKind};
 use dashmap::DashMap;
 use serde_json::Value;
 use tower_lsp::{
@@ -7,16 +8,65 @@ use tower_lsp::{
         Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
         DidOpenTextDocumentParams, ExecuteCommandOptions, ExecuteCommandParams, Hover,
         HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-        MarkupContent, MarkupKind, MessageType, Position, ServerCapabilities,
-        TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+        MarkupContent, MarkupKind, MessageType, Position, SemanticToken, SemanticTokenType,
+        SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+        SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+        ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+        TextDocumentSyncKind, Url, WorkDoneProgressOptions,
     },
     Client, LanguageServer,
 };
 
 use super::attribute::{ManifoldAttribute, ManifoldAttributeKind};
-use super::document::ManifoldDocument;
+use super::document::{DocumentSemanticToken, ManifoldDocument};
 use super::lineindex::LineIndex;
 use super::notification::{ManifoldNotification, NotificationParams};
+
+const SEMANTIC_TOKEN_TYPES: [SemanticTokenType; 5] = [
+    SemanticTokenType::KEYWORD,
+    SemanticTokenType::VARIABLE,
+    SemanticTokenType::NUMBER,
+    SemanticTokenType::STRING,
+    SemanticTokenType::OPERATOR,
+];
+
+fn semantic_token_kind_index(kind: ExpressionTokenKind) -> u32 {
+    match kind {
+        ExpressionTokenKind::Keyword => 0,
+        ExpressionTokenKind::Identifier => 1,
+        ExpressionTokenKind::Number => 2,
+        ExpressionTokenKind::String => 3,
+        ExpressionTokenKind::Operator => 4,
+    }
+}
+
+fn encode_semantic_tokens(tokens: &[DocumentSemanticToken]) -> Vec<SemanticToken> {
+    let mut data = Vec::with_capacity(tokens.len());
+    let mut previous_line = 0;
+    let mut previous_start = 0;
+
+    for token in tokens {
+        let delta_line = token.line.saturating_sub(previous_line);
+        let delta_start = if delta_line == 0 {
+            token.start_char.saturating_sub(previous_start)
+        } else {
+            token.start_char
+        };
+
+        data.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length: token.length,
+            token_type: semantic_token_kind_index(token.kind),
+            token_modifiers_bitset: 0,
+        });
+
+        previous_line = token.line;
+        previous_start = token.start_char;
+    }
+
+    data
+}
 
 #[derive(Debug, Clone)]
 struct StoredDocument {
@@ -146,6 +196,19 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::INCREMENTAL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options: WorkDoneProgressOptions::default(),
+                            legend: SemanticTokensLegend {
+                                token_types: SEMANTIC_TOKEN_TYPES.iter().cloned().collect(),
+                                token_modifiers: Vec::new(),
+                            },
+                            range: None,
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        },
+                    ),
+                ),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![String::from("custom.notification")],
                     ..Default::default()
@@ -212,13 +275,37 @@ impl LanguageServer for Backend {
 
         if let Some(attribute) = self.manifold_attribute_at(&uri, &position) {
             let range = attribute.range.clone();
+            let base_message = match attribute.kind {
+                ManifoldAttributeKind::Attribute => format!(
+                    "`{}` is treated as a Manifold-specific attribute because its element is registered with `data-mf-register`.",
+                    attribute.name
+                ),
+                ManifoldAttributeKind::TextExpression => format!(
+                    "Expression `{}` is evaluated by Manifold because its ancestor is registered with `data-mf-register`.",
+                    attribute.name
+                ),
+            };
+
+            let highlighted = if let Some(expr) = attribute
+                .expression
+                .as_ref()
+                .map(|expr| expr.trim())
+                .filter(|expr| !expr.is_empty())
+            {
+                if parse_expression(expr).is_ok() {
+                    let sanitized = expr.replace("```", "`\u{200b}```");
+                    format!("{base}\n\n```ts\n{sanitized}\n```", base = &base_message)
+                } else {
+                    base_message.clone()
+                }
+            } else {
+                base_message.clone()
+            };
+
             let hover = Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
-                    value: format!(
-                        "`{}` is treated as a Manifold-specific attribute because its element is registered with `data-mf-register`.",
-                        attribute.name
-                    ),
+                    value: highlighted,
                 }),
                 range: Some(range),
             };
@@ -226,6 +313,26 @@ impl LanguageServer for Backend {
         } else {
             Ok(None)
         }
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>, Error> {
+        let uri = params.text_document.uri;
+
+        let data = self
+            .documents
+            .get(&uri)
+            .map(|doc| encode_semantic_tokens(&doc.parsed.semantic_tokens()))
+            .unwrap_or_default();
+
+        let tokens = SemanticTokens {
+            result_id: None,
+            data,
+        };
+
+        Ok(Some(tokens.into()))
     }
 
     async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>, Error> {

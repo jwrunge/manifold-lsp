@@ -13,6 +13,9 @@ tower-lsp = "0.20.0"
 serde = { version = "1.0", features = ["derive"] }
 tracing-subscriber = "0.3.20"
 dashmap = "5.5"
+swc_common = "0.33.21"
+swc_ecma_ast = "0.111.1"
+swc_ecma_parser = { version = "0.142.2", features = ["typescript"] }
 
 [[bin]]
 name = "server"

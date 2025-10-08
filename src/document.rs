@@ -1,12 +1,21 @@
 use tower_lsp::lsp_types::{Position, Range};
 
 use super::attribute::{ManifoldAttribute, ManifoldAttributeKind, ParsedAttribute};
+use super::expression::{tokenize_expression, ExpressionToken, ExpressionTokenKind};
 use super::lineindex::LineIndex;
 
 #[derive(Debug, Clone)]
 pub struct ManifoldDocument {
     pub attributes: Vec<ManifoldAttribute>,
     pub line_index: LineIndex,
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentSemanticToken {
+    pub line: u32,
+    pub start_char: u32,
+    pub length: u32,
+    pub kind: ExpressionTokenKind,
 }
 
 impl ManifoldDocument {
@@ -31,6 +40,52 @@ impl ManifoldDocument {
         self.attributes
             .iter()
             .find(|attr| offset >= attr.start_offset && offset < attr.end_offset)
+    }
+
+    pub fn semantic_tokens(&self) -> Vec<DocumentSemanticToken> {
+        let mut results = Vec::new();
+
+        for attribute in &self.attributes {
+            let (Some(expr), Some((span_start, _))) =
+                (attribute.expression.as_ref(), attribute.expression_span)
+            else {
+                continue;
+            };
+
+            let tokens: Vec<ExpressionToken> = tokenize_expression(expr);
+            let base_offset = span_start;
+
+            for token in tokens {
+                if token.end <= token.start {
+                    continue;
+                }
+
+                let absolute_start = base_offset + token.start;
+                let absolute_end = base_offset + token.end;
+                let start_pos = self.line_index.position_at(absolute_start);
+                let end_pos = self.line_index.position_at(absolute_end);
+
+                if end_pos.line != start_pos.line {
+                    continue;
+                }
+
+                let length = end_pos.character.saturating_sub(start_pos.character);
+
+                if length == 0 {
+                    continue;
+                }
+
+                results.push(DocumentSemanticToken {
+                    line: start_pos.line,
+                    start_char: start_pos.character,
+                    length,
+                    kind: token.kind,
+                });
+            }
+        }
+
+        results.sort_by(|a, b| (a.line, a.start_char).cmp(&(b.line, b.start_char)));
+        results
     }
 }
 
@@ -258,11 +313,27 @@ impl<'a> TagScanner<'a> {
         if new_state.registered && !new_state.ignore_active {
             for attr in parsed_attributes.into_iter() {
                 if attr.name.starts_with(':') || attr.name_lower.starts_with("data-mf") {
-                    let (start, end) = match attr.value_range {
+                    let (start, end, expression, expression_span) = match attr.value_range {
                         Some((value_start, value_end)) if value_end > value_start => {
-                            (value_start, value_end)
+                            let raw = &self.text[value_start..value_end];
+                            let trimmed = raw.trim();
+                            if trimmed.is_empty() {
+                                (value_start, value_end, None, None)
+                            } else {
+                                let rel_start = raw
+                                    .find(trimmed)
+                                    .map(|offset| value_start + offset)
+                                    .unwrap_or(value_start);
+                                let rel_end = rel_start + trimmed.len();
+                                (
+                                    value_start,
+                                    value_end,
+                                    Some(trimmed.to_string()),
+                                    Some((rel_start, rel_end)),
+                                )
+                            }
                         }
-                        _ => (attr.span_start, attr.span_end),
+                        _ => (attr.span_start, attr.span_end, None, None),
                     };
                     let range = Range::new(
                         self.line_index.position_at(start),
@@ -274,6 +345,8 @@ impl<'a> TagScanner<'a> {
                         start_offset: start,
                         end_offset: end,
                         kind: ManifoldAttributeKind::Attribute,
+                        expression,
+                        expression_span,
                     });
                 }
             }
@@ -360,12 +433,34 @@ impl<'a> TagScanner<'a> {
                 self.line_index.position_at(expr_end),
             );
             let name = self.text[expr_start..expr_end].to_string();
+            let expression = if expr_end > expr_start + 3 {
+                let raw = &self.text[expr_start + 2..expr_end - 1];
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            };
+            let expression_span = expression.as_ref().map(|trimmed| {
+                let raw = &self.text[expr_start + 2..expr_end - 1];
+                let rel_start = raw
+                    .find(trimmed)
+                    .map(|offset| expr_start + 2 + offset)
+                    .unwrap_or(expr_start + 2);
+                let rel_end = rel_start + trimmed.len();
+                (rel_start, rel_end)
+            });
             self.results.push(ManifoldAttribute {
                 name,
                 range,
                 start_offset: expr_start,
                 end_offset: expr_end,
                 kind: ManifoldAttributeKind::TextExpression,
+                expression,
+                expression_span,
             });
             search_idx = expr_end;
         }

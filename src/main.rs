@@ -4,6 +4,7 @@ use tower_lsp::{LspService, Server};
 mod attribute;
 mod backend;
 mod document;
+mod expression;
 mod lineindex;
 mod notification;
 
@@ -33,6 +34,7 @@ async fn main() {
 mod tests {
     use super::attribute::ManifoldAttributeKind;
     use super::document::ManifoldDocument;
+    use super::expression::ExpressionTokenKind;
 
     fn attribute_names(source: &str) -> Vec<String> {
         ManifoldDocument::parse(source)
@@ -50,6 +52,46 @@ mod tests {
             .filter(|attr| attr.kind == ManifoldAttributeKind::TextExpression)
             .map(|attr| attr.name)
             .collect()
+    }
+
+    fn collected_expressions(source: &str) -> Vec<Option<String>> {
+        ManifoldDocument::parse(source)
+            .attributes
+            .into_iter()
+            .map(|attr| attr.expression)
+            .collect()
+    }
+
+    #[test]
+    fn produces_semantic_tokens_for_attribute_expressions() {
+        let html = r#"
+            <div data-mf-register>
+                <button :onclick="count++"></button>
+            </div>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let tokens = document.semantic_tokens();
+
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == ExpressionTokenKind::Identifier));
+    }
+
+    #[test]
+    fn produces_semantic_tokens_for_text_expressions() {
+        let html = r#"
+            <section data-mf-register>
+                ${user.name}
+            </section>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let tokens = document.semantic_tokens();
+
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == ExpressionTokenKind::Identifier));
     }
 
     #[test]
@@ -115,5 +157,23 @@ mod tests {
 
         let expressions = text_expressions(html);
         assert_eq!(expressions, vec!["${name}", "${nested}", "${outside}"]);
+    }
+
+    #[test]
+    fn expression_text_is_captured() {
+        let html = r#"
+            <div data-mf-register>
+                <button :onclick=" count++ "></button>
+                ${ user.name }
+            </div>
+        "#;
+
+        let expressions = collected_expressions(html)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+        assert!(expressions.contains(&"count++".to_string()));
+        assert!(expressions.contains(&"user.name".to_string()));
     }
 }
