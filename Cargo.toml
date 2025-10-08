@@ -16,4 +16,4 @@ dashmap = "5.5"
 
 [[bin]]
 name = "server"
-path = "src/server.rs"
+path = "src/main.rs"
