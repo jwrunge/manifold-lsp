@@ -102,8 +102,8 @@ pub fn tokenize_expression(expr: &str) -> Vec<ExpressionToken> {
             let mut tokens = Vec::new();
             while let Some(token_and_span) = lexer.next() {
                 if let Some(kind) = classify_token(&token_and_span.token) {
-                    let start = token_and_span.span.lo.0 as usize;
-                    let end = token_and_span.span.hi.0 as usize;
+                    let start = token_and_span.span.lo.0.saturating_sub(1) as usize;
+                    let end = token_and_span.span.hi.0.saturating_sub(1) as usize;
                     if end > start {
                         tokens.push(ExpressionToken { start, end, kind });
                     }
