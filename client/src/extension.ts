@@ -4,23 +4,12 @@
  * ------------------------------------------------------------------------------------------ */
 
 import {
-	languages,
 	workspace,
 	EventEmitter,
 	ExtensionContext,
 	window,
-	InlayHintsProvider,
-	TextDocument,
-	CancellationToken,
-	Range,
-	InlayHint,
 	TextDocumentChangeEvent,
-	ProviderResult,
-	commands,
-	WorkspaceEdit,
-	TextEdit,
-	Selection,
-	Uri,
+	DocumentFilter,
 } from "vscode";
 
 import {
@@ -32,9 +21,8 @@ import {
 } from "vscode-languageclient/node";
 
 let client: LanguageClient;
-// type a = Parameters<>;
 
-export async function activate(context: ExtensionContext) {
+export async function activate() {
 	const traceOutputChannel = window.createOutputChannel(
 		"Manifold Language Server trace"
 	);
@@ -53,28 +41,68 @@ export async function activate(context: ExtensionContext) {
 		run,
 		debug: run,
 	};
-	// If the extension is launched in debug mode then the debug server options are used
-	// Otherwise the run options are used
-	// Options to control the language client
+
+	const selectors = getDocumentSelectors();
 	let clientOptions: LanguageClientOptions = {
-		// Register the server for HTML documents with Manifold features
-		documentSelector: [{ scheme: "file", language: "html" }],
-		synchronize: {
-			// Notify the server about file changes to HTML files
-			fileEvents: workspace.createFileSystemWatcher("**/*.html"),
-		},
+		documentSelector:
+			selectors as LanguageClientOptions["documentSelector"],
 		traceOutputChannel,
 	};
 
-	// Create the language client and start the client.
 	client = new LanguageClient(
 		"manifold-language-server",
 		"Manifold Language Server",
 		serverOptions,
 		clientOptions
 	);
-	// activateInlayHints(context);
 	client.start();
+}
+
+type SelectorConfig = {
+	language?: string;
+	scheme?: string;
+};
+
+function getDocumentSelectors(): DocumentFilter[] {
+	const configuration = workspace.getConfiguration("manifoldLanguageServer");
+	const configured = configuration.get<SelectorConfig[]>(
+		"documentSelectors",
+		[
+			{
+				language: "html",
+				scheme: "file",
+			},
+		]
+	);
+
+	const normalized = configured
+		.map((selector) => {
+			if (!selector || typeof selector !== "object") {
+				return null;
+			}
+			const language = selector.language ?? "";
+			const scheme = selector.scheme ?? "file";
+			if (!language) {
+				return null;
+			}
+			const documentFilter: DocumentFilter = {
+				language,
+				scheme,
+			};
+			return documentFilter;
+		})
+		.filter((selector): selector is DocumentFilter => selector !== null);
+
+	if (normalized.length === 0) {
+		return [
+			{
+				language: "html",
+				scheme: "file",
+			},
+		];
+	}
+
+	return normalized;
 }
 
 export function deactivate(): Thenable<void> | undefined {
@@ -91,57 +119,6 @@ export function activateInlayHints(ctx: ExtensionContext) {
 
 		async onConfigChange() {
 			this.dispose();
-
-			const event = this.updateHintsEventEmitter.event;
-			// this.hintsProvider = languages.registerInlayHintsProvider(
-			//   { scheme: "file", language: "nrs" },
-			//   // new (class implements InlayHintsProvider {
-			//   //   onDidChangeInlayHints = event;
-			//   //   resolveInlayHint(hint: InlayHint, token: CancellationToken): ProviderResult<InlayHint> {
-			//   //     const ret = {
-			//   //       label: hint.label,
-			//   //       ...hint,
-			//   //     };
-			//   //     return ret;
-			//   //   }
-			//   //   async provideInlayHints(
-			//   //     document: TextDocument,
-			//   //     range: Range,
-			//   //     token: CancellationToken
-			//   //   ): Promise<InlayHint[]> {
-			//   //     const hints = (await client
-			//   //       .sendRequest("custom/inlay_hint", { path: document.uri.toString() })
-			//   //       .catch(err => null)) as [number, number, string][];
-			//   //     if (hints == null) {
-			//   //       return [];
-			//   //     } else {
-			//   //       return hints.map(item => {
-			//   //         const [start, end, label] = item;
-			//   //         let startPosition = document.positionAt(start);
-			//   //         let endPosition = document.positionAt(end);
-			//   //         return {
-			//   //           position: endPosition,
-			//   //           paddingLeft: true,
-			//   //           label: [
-			//   //             {
-			//   //               value: `${label}`,
-			//   //               // location: {
-			//   //               //   uri: document.uri,
-			//   //               //   range: new Range(1, 0, 1, 0)
-			//   //               // }
-			//   //               command: {
-			//   //                 title: "hello world",
-			//   //                 command: "helloworld.helloWorld",
-			//   //                 arguments: [document.uri],
-			//   //               },
-			//   //             },
-			//   //           ],
-			//   //         };
-			//   //       });
-			//   //     }
-			//   //   }
-			//   // })()
-			// );
 		},
 
 		onDidChangeTextDocument({

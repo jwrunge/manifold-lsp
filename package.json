@@ -19,7 +19,8 @@
 	},
 	"enabledApiProposals": [],
 	"activationEvents": [
-		"onLanguage:html"
+		"onLanguage:html",
+		"onStartupFinished"
 	],
 	"main": "./client/out/extension.js",
 	"contributes": {
@@ -37,6 +38,33 @@
 					],
 					"default": "off",
 					"description": "Traces the communication between VS Code and the language server."
+				},
+				"manifoldLanguageServer.documentSelectors": {
+					"scope": "resource",
+					"type": "array",
+					"description": "Document selectors (scheme + VS Code language IDs) that should activate the Manifold language server.",
+					"default": [
+						{
+							"scheme": "file",
+							"language": "html"
+						}
+					],
+					"items": {
+						"type": "object",
+						"required": [
+							"language"
+						],
+						"properties": {
+							"scheme": {
+								"type": "string",
+								"description": "The URI scheme to match (defaults to 'file')."
+							},
+							"language": {
+								"type": "string",
+								"description": "VS Code language identifier that should be handled by Manifold."
+							}
+						}
+					}
 				}
 			}
 		}
