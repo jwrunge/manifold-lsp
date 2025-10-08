@@ -15,45 +15,25 @@
 		"url": "https://github.com/IWANABETHATGUY/tower-lsp-boilerplate"
 	},
 	"engines": {
-		"vscode": "^1.66.0"
+		"vscode": "^1.85.0"
 	},
 	"enabledApiProposals": [],
 	"activationEvents": [
-		"onLanguage:html",
-		"onLanguage:manifold-html"
+		"onLanguage:html"
 	],
-	"main": "./dist/extension.js",
+	"main": "./client/out/extension.js",
 	"contributes": {
-		"languages": [
-			{
-				"id": "manifold-html",
-				"aliases": [
-					"Manifold HTML"
-				],
-				"extensions": [
-					".html"
-				],
-				"mimetypes": [
-					"text/html"
-				]
-			}
-		],
 		"configuration": {
 			"type": "object",
-			"title": "nrs-language-server",
+			"title": "Manifold Language Server",
 			"properties": {
-				"nrs-language-server.trace.server": {
-					"type": "string",
+				"manifoldLanguageServer.trace.server": {
 					"scope": "window",
+					"type": "string",
 					"enum": [
 						"off",
 						"messages",
 						"verbose"
-					],
-					"enumDescriptions": [
-						"No traces",
-						"Error only",
-						"Full log"
 					],
 					"default": "off",
 					"description": "Traces the communication between VS Code and the language server."
@@ -63,11 +43,9 @@
 	},
 	"scripts": {
 		"postinstall": "cd client && pnpm i",
-		"compile": "npm run check-types && node esbuild.js --production",
-		"check-types": "tsc --noEmit",
-		"watch": "npm-run-all -p watch:*",
-		"watch:esbuild": "node esbuild.js --watch",
-		"watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+		"compile": "pnpm --dir client run compile",
+		"check-types": "pnpm --dir client exec tsc --noEmit --project tsconfig.json",
+		"watch": "pnpm --dir client run watch",
 		"package": "vsce package --no-dependencies"
 	},
 	"devDependencies": {

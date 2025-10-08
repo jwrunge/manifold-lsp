@@ -348,11 +348,12 @@ impl Backend {
     }
 
     async fn refresh_diagnostics(&self, uri: Url) {
-        let diagnostics = self
+        let (diagnostics, count) = self
             .documents
             .get(&uri)
             .map(|doc| {
-                doc.attributes
+                let diagnostics = doc
+                    .attributes
                     .iter()
                     .map(|attr| Diagnostic {
                         range: attr.range.clone(),
@@ -364,12 +365,20 @@ impl Backend {
                         ),
                         ..Diagnostic::default()
                     })
-                    .collect()
+                    .collect();
+                (diagnostics, doc.attributes.len())
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| (Vec::new(), 0));
 
         self.client
-            .publish_diagnostics(uri, diagnostics, None)
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
+        let _ = self
+            .client
+            .log_message(
+                MessageType::LOG,
+                format!("Manifold LSP published {count} diagnostics for {uri}"),
+            )
             .await;
     }
 }
@@ -467,7 +476,9 @@ impl LanguageServer for Backend {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     let (service, socket) = LspService::new(|client| Backend {
         client,

@@ -6,27 +6,11 @@
 	"engines": {
 		"vscode": "^1.85.0"
 	},
-	"main": "./out/src/extension",
+	"main": "./out/extension.js",
 	"activationEvents": [
 		"onLanguage:html"
 	],
 	"contributes": {
-		"languages": [
-			{
-				"id": "manifold-html",
-				"aliases": [
-					"Manifold HTML",
-					"manifold-html"
-				],
-				"extensions": [
-					".html",
-					".htm"
-				],
-				"mimetypes": [
-					"text/html"
-				]
-			}
-		],
 		"configuration": {
 			"type": "object",
 			"title": "Manifold Language Server",

@@ -58,10 +58,7 @@ export async function activate(context: ExtensionContext) {
 	// Options to control the language client
 	let clientOptions: LanguageClientOptions = {
 		// Register the server for HTML documents with Manifold features
-		documentSelector: [
-			{ scheme: "file", language: "html" },
-			{ scheme: "file", language: "manifold-html" },
-		],
+		documentSelector: [{ scheme: "file", language: "html" }],
 		synchronize: {
 			// Notify the server about file changes to HTML files
 			fileEvents: workspace.createFileSystemWatcher("**/*.html"),
