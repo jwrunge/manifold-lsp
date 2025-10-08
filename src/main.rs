@@ -7,6 +7,7 @@ mod document;
 mod expression;
 mod lineindex;
 mod notification;
+mod state;
 
 use backend::Backend;
 
@@ -35,6 +36,7 @@ mod tests {
     use super::attribute::ManifoldAttributeKind;
     use super::document::ManifoldDocument;
     use super::expression::ExpressionTokenKind;
+    use super::state::TypeInfo;
 
     fn attribute_names(source: &str) -> Vec<String> {
         ManifoldDocument::parse(source)
@@ -92,6 +94,65 @@ mod tests {
         assert!(tokens
             .iter()
             .any(|token| token.kind == ExpressionTokenKind::Identifier));
+    }
+
+    #[test]
+    fn infers_type_information_from_state_scripts() {
+        let html = r#"
+            <div data-mf-register>
+                <p>${count}</p>
+            </div>
+            <script type="module">
+                const state = Manifold.create()
+                    .add("count", 0)
+                    .build();
+            </script>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let attribute = document
+            .attributes
+            .iter()
+            .find(|attr| attr.name == "${count}")
+            .expect("count expression recorded");
+
+        let ty = document.expression_type(attribute);
+        assert!(matches!(ty, Some(TypeInfo::Number)));
+    }
+
+    #[test]
+    fn each_binding_introduces_local_types() {
+        let html = r#"
+            <div data-mf-register>
+                <ul>
+                    <li :each="items as item, index">${item}</li>
+                </ul>
+            </div>
+            <script type="module">
+                const state = Manifold.create()
+                    .add("items", ["Apple", "Banana"])
+                    .build();
+            </script>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let attribute = document
+            .attributes
+            .iter()
+            .find(|attr| attr.name == "${item}")
+            .expect("item text expression tracked");
+
+        let ty = document.expression_type(attribute);
+        assert_eq!(ty.unwrap().describe(), "string");
+
+        assert!(attribute
+            .locals
+            .iter()
+            .any(|var| var.name == "item" && var.ty.describe() == "string"));
+        assert!(attribute
+            .locals
+            .iter()
+            .any(|var| var.name == "index" && var.ty.describe() == "number"));
     }
 
     #[test]

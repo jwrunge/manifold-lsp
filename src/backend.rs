@@ -5,19 +5,18 @@ use tower_lsp::{
     async_trait,
     jsonrpc::Error,
     lsp_types::{
-        Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-        DidOpenTextDocumentParams, ExecuteCommandOptions, ExecuteCommandParams, Hover,
-        HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-        MarkupContent, MarkupKind, MessageType, Position, SemanticToken, SemanticTokenType,
-        SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-        SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-        ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-        TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+        DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+        ExecuteCommandOptions, ExecuteCommandParams, Hover, HoverContents, HoverParams,
+        HoverProviderCapability, InitializeParams, InitializeResult, MarkupContent, MarkupKind,
+        MessageType, SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+        SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+        SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentContentChangeEvent,
+        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
     },
     Client, LanguageServer,
 };
 
-use super::attribute::{ManifoldAttribute, ManifoldAttributeKind};
+use super::attribute::ManifoldAttributeKind;
 use super::document::{DocumentSemanticToken, ManifoldDocument};
 use super::lineindex::LineIndex;
 use super::notification::{ManifoldNotification, NotificationParams};
@@ -133,54 +132,15 @@ impl Backend {
         self.documents.remove(uri);
     }
 
-    pub fn manifold_attribute_at(
-        &self,
-        uri: &Url,
-        position: &Position,
-    ) -> Option<ManifoldAttribute> {
-        self.documents
-            .get(uri)
-            .and_then(|doc| doc.parsed.manifold_attribute_at(position).cloned())
-    }
-
     pub async fn refresh_diagnostics(&self, uri: Url) {
-        let (diagnostics, count) = self
-            .documents
-            .get(&uri)
-            .map(|doc| {
-                let diagnostics = doc
-                    .parsed
-                    .attributes
-                    .iter()
-                    .map(|attr| Diagnostic {
-                        range: attr.range.clone(),
-                        severity: Some(DiagnosticSeverity::INFORMATION),
-                        source: Some("manifold".to_string()),
-                        message: match attr.kind {
-                            ManifoldAttributeKind::Attribute => format!(
-                                "Manifold attribute `{}` recognized on a registered element",
-                                attr.name
-                            ),
-                            ManifoldAttributeKind::TextExpression => format!(
-                                "Manifold expression `{}` recognized inside a registered element",
-                                attr.name
-                            ),
-                        },
-                        ..Diagnostic::default()
-                    })
-                    .collect();
-                (diagnostics, doc.parsed.attributes.len())
-            })
-            .unwrap_or_else(|| (Vec::new(), 0));
-
         self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .publish_diagnostics(uri.clone(), Vec::new(), None)
             .await;
         let _ = self
             .client
             .log_message(
                 MessageType::LOG,
-                format!("Manifold LSP published {count} diagnostics for {uri}"),
+                format!("Manifold LSP cleared diagnostics for {uri}"),
             )
             .await;
     }
@@ -273,9 +233,10 @@ impl LanguageServer for Backend {
         let uri = position_params.text_document.uri;
         let position = position_params.position;
 
-        if let Some(attribute) = self.manifold_attribute_at(&uri, &position) {
-            let range = attribute.range.clone();
-            let base_message = match attribute.kind {
+        if let Some(document) = self.documents.get(&uri) {
+            if let Some(attribute) = document.parsed.manifold_attribute_at(&position).cloned() {
+                let range = attribute.range.clone();
+                let intro_message = match attribute.kind {
                 ManifoldAttributeKind::Attribute => format!(
                     "`{}` is treated as a Manifold-specific attribute because its element is registered with `data-mf-register`.",
                     attribute.name
@@ -285,34 +246,60 @@ impl LanguageServer for Backend {
                     attribute.name
                 ),
             };
+                let mut message_parts = vec![intro_message];
 
-            let highlighted = if let Some(expr) = attribute
-                .expression
-                .as_ref()
-                .map(|expr| expr.trim())
-                .filter(|expr| !expr.is_empty())
-            {
-                if parse_expression(expr).is_ok() {
-                    let sanitized = expr.replace("```", "`\u{200b}```");
-                    format!("{base}\n\n```ts\n{sanitized}\n```", base = &base_message)
-                } else {
-                    base_message.clone()
+                if let Some(type_info) = document.parsed.expression_type(&attribute) {
+                    message_parts.push(format!("Type: {}", type_info.describe()));
                 }
-            } else {
-                base_message.clone()
-            };
 
-            let hover = Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: highlighted,
-                }),
-                range: Some(range),
-            };
-            Ok(Some(hover))
-        } else {
-            Ok(None)
+                if let Some(binding) = &attribute.loop_binding {
+                    let mut binding_lines = Vec::new();
+                    binding_lines.push(format!(
+                        "Collection `{}`: {}",
+                        binding.collection,
+                        binding.collection_type.describe()
+                    ));
+                    if let Some(item) = &binding.item {
+                        binding_lines.push(format!("Item `{}`: {}", item.name, item.ty.describe()));
+                    }
+                    if let Some(index) = &binding.index {
+                        binding_lines.push(format!(
+                            "Index `{}`: {}",
+                            index.name,
+                            index.ty.describe()
+                        ));
+                    }
+                    message_parts.push(binding_lines.join("\n"));
+                }
+
+                let mut message = message_parts.join("\n\n");
+
+                if let Some(expr) = attribute
+                    .expression
+                    .as_ref()
+                    .map(|expr| expr.trim())
+                    .filter(|expr| !expr.is_empty())
+                {
+                    if parse_expression(expr).is_ok() {
+                        let sanitized = expr.replace("```", "`\u{200b}```");
+                        message.push_str("\n\n```ts\n");
+                        message.push_str(&sanitized);
+                        message.push_str("\n```");
+                    }
+                }
+
+                let hover = Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: message,
+                    }),
+                    range: Some(range),
+                };
+                return Ok(Some(hover));
+            }
         }
+
+        Ok(None)
     }
 
     async fn semantic_tokens_full(

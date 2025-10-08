@@ -1,5 +1,7 @@
 use tower_lsp::lsp_types::Range;
 
+use crate::state::{LoopBinding, StateVariable};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifoldAttributeKind {
     Attribute,
@@ -15,6 +17,9 @@ pub struct ManifoldAttribute {
     pub kind: ManifoldAttributeKind,
     pub expression: Option<String>,
     pub expression_span: Option<(usize, usize)>,
+    pub state_name: Option<String>,
+    pub locals: Vec<StateVariable>,
+    pub loop_binding: Option<LoopBinding>,
 }
 
 #[derive(Debug)]
