@@ -409,6 +409,16 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
         Unary(unary) => {
             use swc_ecma_ast::UnaryOp;
             match unary.op {
+                // Explicitly disallow unsupported unary operators
+                UnaryOp::Plus => {
+                    return Err("The unary '+' operator is not supported in Manifold expressions. Use explicit values or state variables instead.".into());
+                }
+                UnaryOp::Tilde => {
+                    return Err(
+                        "Bitwise operators (like '~') are not supported in Manifold expressions."
+                            .into(),
+                    );
+                }
                 UnaryOp::TypeOf => {
                     return Err("The 'typeof' operator is not supported in Manifold expressions. Handle type checking in your Manifold state functions instead.".into());
                 }
@@ -427,6 +437,24 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
         Bin(bin) => {
             use swc_ecma_ast::BinaryOp;
             match bin.op {
+                // Disallow operators outside Manifold's supported set
+                BinaryOp::EqEq | BinaryOp::NotEq => {
+                    return Err(
+                        "Use strict equality operators (===, !==) in Manifold expressions.".into(),
+                    );
+                }
+                BinaryOp::BitXor | BinaryOp::BitAnd | BinaryOp::BitOr => {
+                    return Err(
+                        "Bitwise operators (&, |, ^) are not supported in Manifold expressions."
+                            .into(),
+                    );
+                }
+                BinaryOp::LShift | BinaryOp::RShift | BinaryOp::ZeroFillRShift => {
+                    return Err("Bitwise shift operators (<<, >>, >>>) are not supported in Manifold expressions.".into());
+                }
+                BinaryOp::Exp => {
+                    return Err("The exponentiation operator (**) is not supported in Manifold expressions.".into());
+                }
                 BinaryOp::InstanceOf => {
                     return Err("The 'instanceof' operator is not supported in Manifold expressions. Handle type checking in your Manifold state functions instead.".into());
                 }

@@ -271,6 +271,42 @@ mod tests {
         let err = validate_expression("[...array]", false, false).unwrap_err();
         assert!(err.contains("spread operator"));
         assert!(err.contains("not supported"));
+
+        // Test unsupported binary operators
+        let err = validate_expression("count >> 3", false, false).unwrap_err();
+        assert!(
+            err.contains("shift operators") || err.contains(">>") || err.contains("not supported")
+        );
+
+        let err = validate_expression("count >>> 1", false, false).unwrap_err();
+        assert!(
+            err.contains("shift operators") || err.contains(">>>") || err.contains("not supported")
+        );
+
+        let err = validate_expression("count << 2", false, false).unwrap_err();
+        assert!(
+            err.contains("shift operators") || err.contains("<<") || err.contains("not supported")
+        );
+
+        let err = validate_expression("a & b", false, false).unwrap_err();
+        assert!(err.contains("Bitwise") || err.contains("not supported"));
+
+        let err = validate_expression("a | b", false, false).unwrap_err();
+        assert!(err.contains("Bitwise") || err.contains("not supported"));
+
+        let err = validate_expression("a ^ b", false, false).unwrap_err();
+        assert!(err.contains("Bitwise") || err.contains("not supported"));
+
+        let err = validate_expression("a ** b", false, false).unwrap_err();
+        assert!(
+            err.contains("exponentiation") || err.contains("**") || err.contains("not supported")
+        );
+
+        let err = validate_expression("a == b", false, false).unwrap_err();
+        assert!(err.contains("strict equality") || err.contains("===") || err.contains("=="));
+
+        let err = validate_expression("a != b", false, false).unwrap_err();
+        assert!(err.contains("strict equality") || err.contains("!==") || err.contains("!="));
     }
 
     #[test]
@@ -288,6 +324,9 @@ mod tests {
         assert!(validate_expression("func(arg1, arg2)", false, false).is_ok());
         assert!(validate_expression("a && b || c", false, false).is_ok());
         assert!(validate_expression("obj?.prop?.nested", false, false).is_ok());
+        assert!(validate_expression("a ?? b", false, false).is_ok());
+        assert!(validate_expression("!flag", false, false).is_ok());
+        assert!(validate_expression("-value", false, false).is_ok());
 
         // These should pass in event handlers
         assert!(validate_expression("count++", true, true).is_ok());
