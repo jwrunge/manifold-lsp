@@ -6,12 +6,14 @@ use tower_lsp::{
     jsonrpc::Error,
     lsp_types::{
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        ExecuteCommandOptions, ExecuteCommandParams, Hover, HoverContents, HoverParams,
-        HoverProviderCapability, InitializeParams, InitializeResult, MarkupContent, MarkupKind,
-        MessageType, SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-        SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-        SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentContentChangeEvent,
-        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+        ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
+        Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams,
+        InitializeResult, Location, MarkupContent, MarkupKind, MessageType,
+        Position as LspPosition, Range as LspRange, SemanticToken, SemanticTokenType,
+        SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+        SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+        ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+        TextDocumentSyncKind, Url, WorkDoneProgressOptions,
     },
     Client, LanguageServer,
 };
@@ -74,8 +76,17 @@ struct StoredDocument {
 }
 
 impl StoredDocument {
-    fn new(text: String) -> Self {
-        let parsed = ManifoldDocument::parse(&text);
+    fn new_with_uri(text: String, uri: &Url) -> Self {
+        // Derive base_dir from the document URI
+        let base_dir = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()));
+        let parsed = if let Some(base) = base_dir.as_deref() {
+            ManifoldDocument::parse_with_base(&text, Some(base))
+        } else {
+            ManifoldDocument::parse(&text)
+        };
         Self { text, parsed }
     }
 
@@ -106,7 +117,13 @@ impl StoredDocument {
             }
         }
 
-        self.parsed = ManifoldDocument::parse(&self.text);
+        // Keep base_dir the same; rebuild with parse_with_base if present
+        let base = self.parsed.base_dir.as_deref();
+        self.parsed = if let Some(base_dir) = base {
+            ManifoldDocument::parse_with_base(&self.text, Some(base_dir))
+        } else {
+            ManifoldDocument::parse(&self.text)
+        };
     }
 }
 
@@ -124,7 +141,7 @@ impl Backend {
     }
 
     pub fn update_document(&self, uri: Url, text: String) {
-        let document = StoredDocument::new(text);
+        let document = StoredDocument::new_with_uri(text, &uri);
         self.documents.insert(uri, document);
     }
 
@@ -165,6 +182,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::INCREMENTAL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -186,6 +204,93 @@ impl LanguageServer for Backend {
             },
             ..Default::default()
         })
+    }
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>, Error> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let Some(doc) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+
+        // Find attribute under cursor and token text
+        let maybe_attr = doc.parsed.manifold_attribute_at(&position);
+        let Some(attr) = maybe_attr else {
+            return Ok(None);
+        };
+        let (Some(expr), Some((span_start, _))) = (attr.expression.as_ref(), attr.expression_span)
+        else {
+            return Ok(None);
+        };
+
+        // Determine identifier at position
+        let li = &doc.parsed.line_index;
+        let offset = match li.offset_at(&position) {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+        if offset < span_start || offset >= attr.end_offset {
+            return Ok(None);
+        }
+        let _within = offset - span_start;
+
+        // Determine token under cursor in the expression slice
+        let rel_pos = offset.saturating_sub(span_start);
+        let bytes = expr.as_bytes();
+        // Find boundaries of the current token (letters, digits, _, $ or .)
+        let mut start = rel_pos.min(bytes.len());
+        while start > 0 {
+            let ch = bytes[start - 1] as char;
+            if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let mut end = rel_pos.min(bytes.len());
+        while end < bytes.len() {
+            let ch = bytes[end] as char;
+            if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        let token = &expr[start..end];
+        if token.is_empty() {
+            return Ok(None);
+        }
+        // Take the leftmost identifier segment before any dot chain
+        let ident = token.split('.').next().unwrap_or("");
+        if ident.is_empty() {
+            return Ok(None);
+        }
+
+        // Resolve state name
+        let state_name = attr
+            .state_name
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+
+        // Build definition index from current document
+        let html_path = uri.to_file_path().ok();
+        let (index, _unresolved) =
+            crate::state::build_definition_index(&doc.text, html_path.as_deref());
+
+        if let Some(loc) = index.get(&(state_name.clone(), ident.to_string())) {
+            let range = LspRange::new(
+                LspPosition::new(loc.line, loc.character),
+                LspPosition::new(loc.line, loc.character + loc.length),
+            );
+            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                uri: loc.uri.clone(),
+                range,
+            })));
+        }
+
+        Ok(None)
     }
 
     async fn shutdown(&self) -> Result<(), Error> {

@@ -2,15 +2,15 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 use super::attribute::{ManifoldAttribute, ManifoldAttributeKind, ParsedAttribute};
 use super::expression::{
-    tokenize_expression, validate_expression_with_context, 
-    ValidationContext, ExpressionToken, ExpressionTokenKind,
+    tokenize_expression, validate_expression_with_context, ExpressionToken, ExpressionTokenKind,
+    ValidationContext,
 };
 use super::lineindex::LineIndex;
 use std::collections::HashMap;
 
 use super::state::{
-    parse_states_from_scripts, resolve_identifier_type, LoopBinding, ManifoldStates, StateVariable,
-    TypeInfo,
+    parse_states_from_document, resolve_identifier_type, LoopBinding, ManifoldStates,
+    StateVariable, TypeInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -18,6 +18,8 @@ pub struct ManifoldDocument {
     pub attributes: Vec<ManifoldAttribute>,
     pub line_index: LineIndex,
     pub states: ManifoldStates,
+    pub text: String,
+    pub base_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,12 +33,29 @@ pub struct DocumentSemanticToken {
 impl ManifoldDocument {
     pub fn parse(text: &str) -> Self {
         let line_index = LineIndex::new(text);
-        let states = parse_states_from_scripts(text);
+        // Try to parse states including external imports and classic scripts.
+        let (states, _unresolved) =
+            parse_states_from_document(text, std::env::current_dir().ok().as_deref());
         let attributes = Self::extract_manifold_attributes(text, &line_index, &states);
         Self {
             attributes,
             line_index,
             states,
+            text: text.to_string(),
+            base_dir: std::env::current_dir().ok(),
+        }
+    }
+
+    pub fn parse_with_base(text: &str, base_dir: Option<&std::path::Path>) -> Self {
+        let line_index = LineIndex::new(text);
+        let (states, _unresolved) = parse_states_from_document(text, base_dir);
+        let attributes = Self::extract_manifold_attributes(text, &line_index, &states);
+        Self {
+            attributes,
+            line_index,
+            states,
+            text: text.to_string(),
+            base_dir: base_dir.map(|p| p.to_path_buf()),
         }
     }
 
@@ -122,14 +141,18 @@ impl ManifoldDocument {
             };
 
             // Skip variable reference validation for :each expressions since they have special syntax
-            let skip_variable_validation = attribute.name.to_ascii_lowercase() == ":each" 
+            let skip_variable_validation = attribute.name.to_ascii_lowercase() == ":each"
                 || attribute.name.to_ascii_lowercase() == "data-mf-each";
 
             if let Err(message) = validate_expression_with_context(
-                expr, 
-                allow_assignments, 
-                allow_inline_functions, 
-                if skip_variable_validation { None } else { Some(&context) }
+                expr,
+                allow_assignments,
+                allow_inline_functions,
+                if skip_variable_validation {
+                    None
+                } else {
+                    Some(&context)
+                },
             ) {
                 let range = Range::new(
                     self.line_index.position_at(start_offset),
@@ -148,6 +171,27 @@ impl ManifoldDocument {
                     data: None,
                 });
             }
+        }
+
+        // Surface a single hint diagnostic if there are unresolved external sources
+        let (_states_check, unresolved) =
+            parse_states_from_document(&self.text, self.base_dir.as_deref());
+        if !unresolved.is_empty() {
+            let msg = format!(
+                "Some external Manifold state sources could not be read: {}. Configure include paths or ensure files exist.",
+                unresolved.join(", ")
+            );
+            diagnostics.push(Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: None,
+                code_description: None,
+                source: Some("manifold".to_string()),
+                message: msg,
+                related_information: None,
+                tags: None,
+                data: None,
+            });
         }
 
         diagnostics

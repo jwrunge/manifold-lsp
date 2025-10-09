@@ -1,5 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::sink;
+use std::path::{Path, PathBuf};
+use tower_lsp::lsp_types::Url;
 
 use swc_common::{
     errors::{EmitterWriter, Handler, HANDLER},
@@ -93,25 +96,146 @@ impl ManifoldState {
 
 pub type ManifoldStates = HashMap<String, ManifoldState>;
 
-pub fn parse_states_from_scripts(text: &str) -> ManifoldStates {
-    let mut states: ManifoldStates = HashMap::new();
+#[derive(Debug, Clone)]
+pub struct DefinitionLocation {
+    pub uri: Url,
+    pub line: u32,
+    pub character: u32,
+    pub length: u32,
+}
 
-    for script in extract_script_blocks(text) {
+pub type DefinitionIndex = HashMap<(String, String), DefinitionLocation>;
+
+pub fn parse_states_from_scripts(text: &str) -> ManifoldStates {
+    // Backward-compatible entry that ignores unresolved includes.
+    let (states, _unresolved) = parse_states_from_document(text, None);
+    states
+}
+
+pub fn parse_states_from_document(
+    text: &str,
+    base_dir: Option<&Path>,
+) -> (ManifoldStates, Vec<String>) {
+    let mut states: ManifoldStates = HashMap::new();
+    let (inline_scripts, srcs) = extract_script_blocks_and_srcs(text);
+
+    let default_base = std::env::current_dir().ok();
+    let base = base_dir.or(default_base.as_deref());
+    let mut unresolved: Vec<String> = Vec::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+
+    // Parse inline scripts, follow imports
+    for script in inline_scripts {
         if let Some(module) = parse_script_module(&script) {
-            for item in module.body {
+            process_module_for_states(&module, &mut states);
+            if let Some(base) = base {
+                follow_imports(&module, base, &mut states, &mut visited, &mut unresolved, 0);
+            }
+        }
+    }
+
+    // Parse classic/extern scripts referenced via src
+    for src in srcs {
+        if let Some(base) = base {
+            if let Some((content, pathbuf)) = resolve_and_read(&src, base) {
+                visited.insert(pathbuf);
+                if let Some(module) = parse_script_module(&content) {
+                    process_module_for_states(&module, &mut states);
+                    follow_imports(&module, base, &mut states, &mut visited, &mut unresolved, 0);
+                }
+            } else {
+                unresolved.push(src);
+            }
+        } else {
+            // No base directory; record as unresolved so we can inform the user
+            unresolved.push(src);
+        }
+    }
+
+    (states, unresolved)
+}
+
+pub fn build_definition_index(
+    html_text: &str,
+    html_path: Option<&Path>,
+) -> (DefinitionIndex, Vec<String>) {
+    let mut index: DefinitionIndex = HashMap::new();
+    let (inline_scripts, srcs, starts) = extract_script_blocks_srcs_with_starts(html_text);
+    let html_uri = html_path.and_then(|p| Url::from_file_path(p).ok());
+    let html_li = crate::lineindex::LineIndex::new(html_text);
+
+    let default_base = html_path
+        .map(|p| p.parent().map(|pp| pp.to_path_buf()))
+        .flatten()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut unresolved: Vec<String> = Vec::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+
+    // Inline scripts: parse and harvest definitions; positions map to HTML URI
+    for (script, start) in inline_scripts.iter().zip(starts.iter()) {
+        if let Some(module) = parse_script_module(script) {
+            // Collect property names per state
+            let mut defs = Vec::<(String, String)>::new();
+            for item in module.body.clone() {
                 if let Some(definition) = analyze_module_item(item) {
-                    let name = definition.name.unwrap_or_else(|| "default".to_string());
-                    let mut state = states.remove(&name).unwrap_or_else(ManifoldState::new);
-                    for (prop, ty) in definition.properties {
-                        state.set_property(prop, ty);
+                    let state_name = definition.name.unwrap_or_else(|| "default".to_string());
+                    for (prop, _ty) in definition.properties.into_iter() {
+                        defs.push((state_name.clone(), prop));
                     }
-                    states.insert(name, state);
+                }
+            }
+            // Simple text search to locate property occurrences
+            for (state_name, prop) in defs {
+                if let Some(pos) = script
+                    .find(&format!("add(\"{}\"", prop))
+                    .or_else(|| script.find(&format!(".add(\"{}\"", prop)))
+                    .or_else(|| script.find(&format!("add('{}'", prop)))
+                    .or_else(|| script.find(&format!(".add('{}'", prop)))
+                {
+                    let absolute = *start + pos;
+                    let p = html_li.position_at(absolute);
+                    if let Some(uri) = html_uri.clone() {
+                        index.insert(
+                            (state_name.clone(), prop.clone()),
+                            DefinitionLocation {
+                                uri,
+                                line: p.line,
+                                character: p.character,
+                                length: prop.len() as u32,
+                            },
+                        );
+                    }
                 }
             }
         }
     }
 
-    states
+    // External scripts via src
+    for src in srcs {
+        if let Some((content, pathbuf)) = resolve_and_read(&src, &default_base) {
+            if visited.insert(pathbuf.clone()) {
+                let li = crate::lineindex::LineIndex::new(&content);
+                if let Some(module) = parse_script_module(&content) {
+                    harvest_definitions_from_module(&module, &content, &pathbuf, &li, &mut index);
+                    // follow imports and harvest more
+                    collect_defs_from_imports(
+                        &module,
+                        &pathbuf.parent().unwrap_or(&default_base).to_path_buf(),
+                        &mut index,
+                        &mut visited,
+                        &mut unresolved,
+                        0,
+                    );
+                }
+            }
+        } else {
+            unresolved.push(src);
+        }
+    }
+
+    (index, unresolved)
 }
 
 pub fn resolve_identifier_type(
@@ -148,8 +272,9 @@ pub fn resolve_identifier_type(
     Some(current)
 }
 
-fn extract_script_blocks(text: &str) -> Vec<String> {
-    let mut blocks = Vec::new();
+fn extract_script_blocks_and_srcs(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut srcs: Vec<String> = Vec::new();
     let lower = text.to_lowercase();
     let mut offset = 0;
 
@@ -159,6 +284,12 @@ fn extract_script_blocks(text: &str) -> Vec<String> {
             Some(index) => index,
             None => break,
         };
+        // Extract within the tag to search for src attributes
+        let tag_open = &text[start..start + tag_close_rel + 1];
+        if let Some(src_val) = find_attribute_value(tag_open, "src") {
+            srcs.push(src_val);
+        }
+
         let content_start = start + tag_close_rel + 1;
         let end_rel = match lower[content_start..].find("</script") {
             Some(index) => index,
@@ -174,7 +305,220 @@ fn extract_script_blocks(text: &str) -> Vec<String> {
         offset = after_end;
     }
 
-    blocks
+    (blocks, srcs)
+}
+
+fn extract_script_blocks_srcs_with_starts(text: &str) -> (Vec<String>, Vec<String>, Vec<usize>) {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut srcs: Vec<String> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
+    let lower = text.to_lowercase();
+    let mut offset = 0;
+
+    while let Some(start_rel) = lower[offset..].find("<script") {
+        let start = offset + start_rel;
+        let tag_close_rel = match lower[start..].find('>') {
+            Some(index) => index,
+            None => break,
+        };
+        let tag_open = &text[start..start + tag_close_rel + 1];
+        if let Some(src_val) = find_attribute_value(tag_open, "src") {
+            srcs.push(src_val);
+        }
+        let content_start = start + tag_close_rel + 1;
+        let end_rel = match lower[content_start..].find("</script") {
+            Some(index) => index,
+            None => break,
+        };
+        let content_end = content_start + end_rel;
+        starts.push(content_start);
+        blocks.push(text[content_start..content_end].to_string());
+        let after_end = match lower[content_end..].find('>') {
+            Some(index) => content_end + index + 1,
+            None => content_end,
+        };
+        offset = after_end;
+    }
+
+    (blocks, srcs, starts)
+}
+
+fn find_attribute_value(tag_open: &str, attr: &str) -> Option<String> {
+    // naive attribute extractor for src="..." or src='...'
+    let lower = tag_open.to_ascii_lowercase();
+    let needle = format!("{}=", attr);
+    let mut i = 0usize;
+    while let Some(pos) = lower[i..].find(&needle) {
+        let idx = i + pos + needle.len();
+        let bytes = tag_open.as_bytes();
+        if idx >= bytes.len() {
+            break;
+        }
+        let quote = bytes[idx];
+        if quote == b'"' || quote == b'\'' {
+            let rest = &tag_open[idx + 1..];
+            if let Some(end) = rest.find(quote as char) {
+                return Some(rest[..end].to_string());
+            }
+        }
+        i = idx + 1;
+    }
+    None
+}
+
+fn process_module_for_states(module: &Module, states: &mut ManifoldStates) {
+    for item in module.body.clone() {
+        if let Some(definition) = analyze_module_item(item) {
+            let name = definition.name.unwrap_or_else(|| "default".to_string());
+            let mut state = states.remove(&name).unwrap_or_else(ManifoldState::new);
+            for (prop, ty) in definition.properties {
+                state.set_property(prop, ty);
+            }
+            states.insert(name, state);
+        }
+    }
+}
+
+fn follow_imports(
+    module: &Module,
+    base: &Path,
+    states: &mut ManifoldStates,
+    visited: &mut HashSet<PathBuf>,
+    unresolved: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > 16 {
+        return; // reasonable safety cap
+    }
+    let imports = collect_import_paths(module);
+    for import in imports {
+        if let Some((content, pathbuf)) = resolve_and_read(&import, base) {
+            if visited.insert(pathbuf.clone()) {
+                if let Some(child) = parse_script_module(&content) {
+                    process_module_for_states(&child, states);
+                    follow_imports(
+                        &child,
+                        &pathbuf.parent().unwrap_or(base).to_path_buf(),
+                        states,
+                        visited,
+                        unresolved,
+                        depth + 1,
+                    );
+                }
+            }
+        } else {
+            unresolved.push(import);
+        }
+    }
+}
+
+fn collect_import_paths(module: &Module) -> Vec<String> {
+    let mut paths = Vec::new();
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::Import(import)) = item {
+            let src = import.src.value.to_string();
+            paths.push(src);
+        }
+    }
+    paths
+}
+
+fn resolve_and_read(specifier: &str, base: &Path) -> Option<(String, PathBuf)> {
+    // Resolve relative and absolute paths; ignore bare specifiers (e.g., 'react')
+    if specifier.starts_with('.') || specifier.starts_with('/') {
+        let joined = if specifier.starts_with('/') {
+            PathBuf::from(specifier)
+        } else {
+            base.join(specifier)
+        };
+        let candidates = vec![
+            joined.clone(),
+            joined.with_extension("ts"),
+            joined.with_extension("js"),
+            joined.with_extension("mjs"),
+            joined.with_extension("cjs"),
+        ];
+        for path in candidates {
+            if let Ok(content) = fs::read_to_string(&path) {
+                return Some((content, canonical_or(path)));
+            }
+        }
+    }
+    None
+}
+
+fn canonical_or(path: PathBuf) -> PathBuf {
+    fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn harvest_definitions_from_module(
+    module: &Module,
+    content: &str,
+    file_path: &Path,
+    li: &crate::lineindex::LineIndex,
+    index: &mut DefinitionIndex,
+) {
+    for item in module.body.clone() {
+        if let Some(definition) = analyze_module_item(item) {
+            let state_name = definition.name.unwrap_or_else(|| "default".to_string());
+            for (prop, _ty) in definition.properties.into_iter() {
+                // naive text search to get position
+                if let Some(pos) = content
+                    .find(&format!("add(\"{}\"", prop))
+                    .or_else(|| content.find(&format!(".add(\"{}\"", prop)))
+                    .or_else(|| content.find(&format!("add('{}'", prop)))
+                    .or_else(|| content.find(&format!(".add('{}'", prop)))
+                {
+                    if let Ok(uri) = Url::from_file_path(file_path) {
+                        let p = li.position_at(pos);
+                        index.insert(
+                            (state_name.clone(), prop.clone()),
+                            DefinitionLocation {
+                                uri,
+                                line: p.line,
+                                character: p.character,
+                                length: prop.len() as u32,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_defs_from_imports(
+    module: &Module,
+    base: &Path,
+    index: &mut DefinitionIndex,
+    visited: &mut HashSet<PathBuf>,
+    unresolved: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > 16 {
+        return;
+    }
+    let imports = collect_import_paths(module);
+    for import in imports {
+        if let Some((content, pathbuf)) = resolve_and_read(&import, base) {
+            if visited.insert(pathbuf.clone()) {
+                let li = crate::lineindex::LineIndex::new(&content);
+                if let Some(child) = parse_script_module(&content) {
+                    harvest_definitions_from_module(&child, &content, &pathbuf, &li, index);
+                    collect_defs_from_imports(
+                        &child,
+                        &pathbuf.parent().unwrap_or(base).to_path_buf(),
+                        index,
+                        visited,
+                        unresolved,
+                        depth + 1,
+                    );
+                }
+            }
+        } else {
+            unresolved.push(import);
+        }
+    }
 }
 
 fn parse_script_module(script: &str) -> Option<Module> {

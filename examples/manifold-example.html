@@ -45,15 +45,12 @@
 
 		<script type="module">
 			import Manifold from "https://cdn.jsdelivr.net/npm/mfld@latest/dist/manifold.es.js";
+			import { isolatedState } from "./external.js";
 
 			const state = Manifold.create()
 				.add("count", 0)
 				.add("items", ["Apple", "Banana", "Cherry"])
 				.add("username", "World")
-				.build();
-
-			const isolatedState = Manifold.create("isolated")
-				.add("isolatedVar", "I'm isolated!")
 				.build();
 		</script>
 	</body>
