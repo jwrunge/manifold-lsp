@@ -1,7 +1,9 @@
-use tower_lsp::lsp_types::{Position, Range};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 use super::attribute::{ManifoldAttribute, ManifoldAttributeKind, ParsedAttribute};
-use super::expression::{tokenize_expression, ExpressionToken, ExpressionTokenKind};
+use super::expression::{
+    tokenize_expression, validate_expression, ExpressionToken, ExpressionTokenKind,
+};
 use super::lineindex::LineIndex;
 use std::collections::HashMap;
 
@@ -96,6 +98,50 @@ impl ManifoldDocument {
 
         results.sort_by(|a, b| (a.line, a.start_char).cmp(&(b.line, b.start_char)));
         results
+    }
+
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+
+        for attribute in &self.attributes {
+            let (Some(expr), Some((start_offset, end_offset))) =
+                (attribute.expression.as_ref(), attribute.expression_span)
+            else {
+                continue;
+            };
+
+            let allow_inline_functions = Self::attribute_allows_inline_functions(attribute);
+
+            if let Err(message) = validate_expression(expr, false, allow_inline_functions) {
+                let range = Range::new(
+                    self.line_index.position_at(start_offset),
+                    self.line_index.position_at(end_offset),
+                );
+
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("manifold".to_string()),
+                    message,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+
+        diagnostics
+    }
+
+    fn attribute_allows_inline_functions(attribute: &ManifoldAttribute) -> bool {
+        if attribute.kind != ManifoldAttributeKind::Attribute {
+            return false;
+        }
+
+        let lower = attribute.name.to_ascii_lowercase();
+        lower.starts_with(":on") || lower.starts_with("data-mf-on")
     }
 
     pub fn expression_type(&self, attribute: &ManifoldAttribute) -> Option<TypeInfo> {

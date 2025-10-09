@@ -133,14 +133,23 @@ impl Backend {
     }
 
     pub async fn refresh_diagnostics(&self, uri: Url) {
+        let diagnostics = self
+            .documents
+            .get(&uri)
+            .map(|document| document.parsed.diagnostics())
+            .unwrap_or_default();
+
+        let count = diagnostics.len();
+
         self.client
-            .publish_diagnostics(uri.clone(), Vec::new(), None)
+            .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
+
         let _ = self
             .client
             .log_message(
                 MessageType::LOG,
-                format!("Manifold LSP cleared diagnostics for {uri}"),
+                format!("Manifold LSP reported {count} diagnostics for {uri}"),
             )
             .await;
     }
