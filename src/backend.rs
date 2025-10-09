@@ -220,6 +220,27 @@ impl LanguageServer for Backend {
         let Some(attr) = maybe_attr else {
             return Ok(None);
         };
+        // Jump to state definition when clicking state name in data-mf-register
+        if attr.name.eq_ignore_ascii_case("data-mf-register") {
+            if let Some(expr) = &attr.expression {
+                let html_path = uri.to_file_path().ok();
+                let (state_idx, _unresolved) =
+                    crate::state::build_state_name_index(&doc.text, html_path.as_deref());
+                let name = expr.trim().trim_matches('"').trim_matches('\'');
+                if let Some(loc) = state_idx.get(name) {
+                    let range = LspRange::new(
+                        LspPosition::new(loc.line, loc.character),
+                        LspPosition::new(loc.line, loc.character + loc.length),
+                    );
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: loc.uri.clone(),
+                        range,
+                    })));
+                }
+            }
+            return Ok(None);
+        }
+
         let (Some(expr), Some((span_start, _))) = (attr.expression.as_ref(), attr.expression_span)
         else {
             return Ok(None);

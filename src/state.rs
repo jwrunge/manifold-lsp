@@ -209,6 +209,16 @@ pub fn build_definition_index(
                     }
                 }
             }
+
+            // Follow ESM imports from this inline module to discover external definitions
+            collect_defs_from_imports(
+                &module,
+                &default_base,
+                &mut index,
+                &mut visited,
+                &mut unresolved,
+                0,
+            );
         }
     }
 
@@ -236,6 +246,91 @@ pub fn build_definition_index(
     }
 
     (index, unresolved)
+}
+
+pub fn build_state_name_index(
+    html_text: &str,
+    html_path: Option<&Path>,
+) -> (HashMap<String, DefinitionLocation>, Vec<String>) {
+    let mut index: HashMap<String, DefinitionLocation> = HashMap::new();
+    let (inline_scripts, srcs, starts) = extract_script_blocks_srcs_with_starts(html_text);
+    let html_uri = html_path.and_then(|p| Url::from_file_path(p).ok());
+    let html_li = crate::lineindex::LineIndex::new(html_text);
+
+    let default_base = html_path
+        .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut unresolved: Vec<String> = Vec::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+
+    // Inline scripts
+    for (script, start) in inline_scripts.iter().zip(starts.iter()) {
+        if let Some(module) = parse_script_module(script) {
+            // Collect state names
+            let mut names: Vec<String> = Vec::new();
+            for item in module.body.clone() {
+                if let Some(definition) = analyze_module_item(item) {
+                    if let Some(name) = definition.name {
+                        names.push(name);
+                    }
+                }
+            }
+            for name in names {
+                if let Some(pos) = find_create_call(script, &name) {
+                    if let Some(uri) = html_uri.clone() {
+                        let absolute = *start + pos;
+                        let p = html_li.position_at(absolute);
+                        index.insert(
+                            name.clone(),
+                            DefinitionLocation {
+                                uri,
+                                line: p.line,
+                                character: p.character,
+                                length: name.len() as u32,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // External scripts via src
+    for src in srcs {
+        if let Some((content, pathbuf)) = resolve_and_read(&src, &default_base) {
+            if visited.insert(pathbuf.clone()) {
+                let li = crate::lineindex::LineIndex::new(&content);
+                if let Some(module) = parse_script_module(&content) {
+                    harvest_state_names_from_module(&module, &content, &pathbuf, &li, &mut index);
+                    collect_state_names_from_imports(
+                        &module,
+                        &pathbuf.parent().unwrap_or(&default_base).to_path_buf(),
+                        &mut index,
+                        &mut visited,
+                        &mut unresolved,
+                        0,
+                    );
+                }
+            }
+        } else {
+            unresolved.push(src);
+        }
+    }
+
+    (index, unresolved)
+}
+
+fn find_create_call(content: &str, name: &str) -> Option<usize> {
+    [
+        format!("create(\"{}\")", name),
+        format!(".create(\"{}\")", name),
+        format!("create('{}')", name),
+        format!(".create('{}')", name),
+    ]
+    .into_iter()
+    .find_map(|p| content.find(&p))
 }
 
 pub fn resolve_identifier_type(
@@ -415,9 +510,21 @@ fn follow_imports(
 fn collect_import_paths(module: &Module) -> Vec<String> {
     let mut paths = Vec::new();
     for item in &module.body {
-        if let ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::Import(import)) = item {
-            let src = import.src.value.to_string();
-            paths.push(src);
+        if let ModuleItem::ModuleDecl(decl) = item {
+            match decl {
+                swc_ecma_ast::ModuleDecl::Import(import) => {
+                    paths.push(import.src.value.to_string());
+                }
+                swc_ecma_ast::ModuleDecl::ExportNamed(named) => {
+                    if let Some(src) = &named.src {
+                        paths.push(src.value.to_string());
+                    }
+                }
+                swc_ecma_ast::ModuleDecl::ExportAll(all) => {
+                    paths.push(all.src.value.to_string());
+                }
+                _ => {}
+            }
         }
     }
     paths
@@ -437,6 +544,10 @@ fn resolve_and_read(specifier: &str, base: &Path) -> Option<(String, PathBuf)> {
             joined.with_extension("js"),
             joined.with_extension("mjs"),
             joined.with_extension("cjs"),
+            joined.join("index.ts"),
+            joined.join("index.js"),
+            joined.join("index.mjs"),
+            joined.join("index.cjs"),
         ];
         for path in candidates {
             if let Ok(content) = fs::read_to_string(&path) {
@@ -521,6 +632,69 @@ fn collect_defs_from_imports(
     }
 }
 
+fn harvest_state_names_from_module(
+    module: &Module,
+    content: &str,
+    file_path: &Path,
+    li: &crate::lineindex::LineIndex,
+    index: &mut HashMap<String, DefinitionLocation>,
+) {
+    for item in module.body.clone() {
+        if let Some(definition) = analyze_module_item(item) {
+            if let Some(name) = definition.name {
+                if let Some(pos) = find_create_call(content, &name) {
+                    if let Ok(uri) = Url::from_file_path(file_path) {
+                        let p = li.position_at(pos);
+                        index.insert(
+                            name.clone(),
+                            DefinitionLocation {
+                                uri,
+                                line: p.line,
+                                character: p.character,
+                                length: name.len() as u32,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_state_names_from_imports(
+    module: &Module,
+    base: &Path,
+    index: &mut HashMap<String, DefinitionLocation>,
+    visited: &mut HashSet<PathBuf>,
+    unresolved: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > 16 {
+        return;
+    }
+    let imports = collect_import_paths(module);
+    for import in imports {
+        if let Some((content, pathbuf)) = resolve_and_read(&import, base) {
+            if visited.insert(pathbuf.clone()) {
+                let li = crate::lineindex::LineIndex::new(&content);
+                if let Some(child) = parse_script_module(&content) {
+                    harvest_state_names_from_module(&child, &content, &pathbuf, &li, index);
+                    collect_state_names_from_imports(
+                        &child,
+                        &pathbuf.parent().unwrap_or(base).to_path_buf(),
+                        index,
+                        visited,
+                        unresolved,
+                        depth + 1,
+                    );
+                }
+            }
+        } else {
+            unresolved.push(import);
+        }
+    }
+}
+
 fn parse_script_module(script: &str) -> Option<Module> {
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter(
@@ -578,7 +752,25 @@ fn analyze_module_item(item: ModuleItem) -> Option<StateDefinition> {
             },
             _ => None,
         },
-        ModuleItem::ModuleDecl(_) => None,
+        ModuleItem::ModuleDecl(module_decl) => match module_decl {
+            swc_ecma_ast::ModuleDecl::ExportDecl(export_decl) => match export_decl.decl {
+                swc_ecma_ast::Decl::Var(var_decl) => {
+                    for declarator in var_decl.decls {
+                        if let Some(init) = declarator.init {
+                            if let Some(def) = analyze_expression(init.as_ref()) {
+                                return Some(def);
+                            }
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            },
+            swc_ecma_ast::ModuleDecl::ExportDefaultExpr(default_expr) => {
+                analyze_expression(&default_expr.expr)
+            }
+            _ => None,
+        },
     }
 }
 
