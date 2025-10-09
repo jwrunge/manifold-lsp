@@ -489,7 +489,11 @@ mod tests {
         );
 
         let messages: Vec<String> = diagnostics.iter().map(|d| d.message.clone()).collect();
-        assert!(messages.iter().any(|m| m.contains("Unknown variable") && m.contains("unknownVar")));
-        assert!(messages.iter().any(|m| m.contains("Unknown variable") && m.contains("globalVar")));
+        assert!(messages
+            .iter()
+            .any(|m| m.contains("Unknown variable") && m.contains("unknownVar")));
+        assert!(messages
+            .iter()
+            .any(|m| m.contains("Unknown variable") && m.contains("globalVar")));
     }
 }
