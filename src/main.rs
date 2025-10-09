@@ -463,7 +463,7 @@ mod tests {
             </div>
             <div data-mf-register="namedState">
                 <div :text="localVar">Should be valid</div>
-                <div :text="globalVar">Should also be valid (fallback)</div>
+                <div :text="globalVar">Should be invalid (not visible in named state)</div>
                 <div :text="unknownVar">Should error</div>
             </div>
             <script type="module">
@@ -480,15 +480,16 @@ mod tests {
         let document = ManifoldDocument::parse(html);
         let diagnostics = document.diagnostics();
 
-        // Should have 1 error for the unknown variable
+        // Should have 2 errors: one for unknownVar and one for globalVar not visible in namedState
         assert_eq!(
             diagnostics.len(),
-            1,
-            "Should detect only the unknown variable: {:?}",
+            2,
+            "Should detect unknown variables with proper scoping: {:?}",
             diagnostics
         );
 
-        assert!(diagnostics[0].message.contains("unknownVar"));
-        assert!(diagnostics[0].message.contains("Unknown variable"));
+        let messages: Vec<String> = diagnostics.iter().map(|d| d.message.clone()).collect();
+        assert!(messages.iter().any(|m| m.contains("Unknown variable") && m.contains("unknownVar")));
+        assert!(messages.iter().any(|m| m.contains("Unknown variable") && m.contains("globalVar")));
     }
 }

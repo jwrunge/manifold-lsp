@@ -823,22 +823,26 @@ fn validate_identifier_reference(
     }
 
     // Check if it's in the default state
-    if let Some(default_state) = context.states.get("default") {
-        if default_state.property_type(name).is_some() {
-            return Ok(());
+    // Only fall back to the default state when no specific state is active
+    if context.state_name.is_none() {
+        if let Some(default_state) = context.states.get("default") {
+            if default_state.property_type(name).is_some() {
+                return Ok(());
+            }
         }
     }
 
     // If we get here, the variable is not found
-    Err(format!(
-        "Unknown variable '{}'. Variables must be defined in your Manifold state{}.",
-        name,
-        if context.state_name.is_some() {
-            format!(" or available in the current scope")
-        } else {
-            String::new()
-        }
-    ))
+    Err(match context.state_name {
+        Some(state_name) => format!(
+            "Unknown variable '{}'. Variables must be defined in your Manifold state ('{}') or provided from the current scope (e.g., :each locals).",
+            name, state_name
+        ),
+        None => format!(
+            "Unknown variable '{}'. Variables must be defined in your Manifold state or provided from the current scope (e.g., :each locals).",
+            name
+        ),
+    })
 }
 
 fn is_known_global(name: &str) -> bool {
