@@ -237,4 +237,111 @@ mod tests {
         assert!(expressions.contains(&"count++".to_string()));
         assert!(expressions.contains(&"user.name".to_string()));
     }
+
+    #[test]
+    fn provides_helpful_error_messages_for_invalid_expressions() {
+        use super::expression::validate_expression;
+
+        // Test assignment outside event handler
+        let err = validate_expression("count = 5", false, false).unwrap_err();
+        assert!(err.contains("only allowed in event handlers"));
+        assert!(err.contains("define functions in your Manifold state"));
+
+        // Test template literal
+        let err = validate_expression("`hello ${name}`", false, false).unwrap_err();
+        assert!(err.contains("Template literals"));
+        assert!(err.contains("Use string concatenation"));
+
+        // Test global access
+        let err = validate_expression("Math.max(1, 2)", false, false).unwrap_err();
+        assert!(err.contains("Global 'Math' is not available"));
+        assert!(err.contains("Manifold state functions"));
+
+        // Test typeof operator
+        let err = validate_expression("typeof value", false, false).unwrap_err();
+        assert!(err.contains("typeof"));
+        assert!(err.contains("not supported"));
+
+        // Test arrow function outside event handler
+        let err = validate_expression("x => x + 1", false, false).unwrap_err();
+        assert!(err.contains("Arrow functions"));
+        assert!(err.contains("only supported in event handlers"));
+
+        // Test spread operator
+        let err = validate_expression("[...array]", false, false).unwrap_err();
+        assert!(err.contains("spread operator"));
+        assert!(err.contains("not supported"));
+    }
+
+    #[test]
+    fn allows_valid_manifold_expressions() {
+        use super::expression::validate_expression;
+
+        // These should all pass
+        assert!(validate_expression("count", false, false).is_ok());
+        assert!(validate_expression("user.name", false, false).is_ok());
+        assert!(validate_expression("items[0]", false, false).is_ok());
+        assert!(validate_expression("a + b", false, false).is_ok());
+        assert!(validate_expression("condition ? value1 : value2", false, false).is_ok());
+        assert!(validate_expression("{ key: value }", false, false).is_ok());
+        assert!(validate_expression("[1, 2, 3]", false, false).is_ok());
+        assert!(validate_expression("func(arg1, arg2)", false, false).is_ok());
+        assert!(validate_expression("a && b || c", false, false).is_ok());
+        assert!(validate_expression("obj?.prop?.nested", false, false).is_ok());
+
+        // These should pass in event handlers
+        assert!(validate_expression("count++", true, true).is_ok());
+        assert!(validate_expression("count = value", true, true).is_ok());
+        assert!(validate_expression("(e) => handleClick(e)", true, true).is_ok());
+    }
+
+    #[test]
+    fn event_handlers_allow_assignments() {
+        let html = r#"
+            <div data-mf-register>
+                <button :onclick="count++">Increment</button>
+                <button :onclick="count--">Decrement</button>
+                <button :onclick="count = 0">Reset</button>
+                <button :onchange="value = 'new'">Change</button>
+                <button data-mf-onclick="items.push(newItem)">Add Item</button>
+            </div>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let diagnostics = document.diagnostics();
+
+        // Should have no errors for valid event handler assignments
+        assert!(
+            diagnostics.is_empty(),
+            "Event handlers should allow assignments but got errors: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn non_event_attributes_reject_assignments() {
+        let html = r#"
+            <div data-mf-register>
+                <div :class="count = 5">Should error</div>
+                <div :text="value++">Should error</div>
+                <div :style="prop = 'test'">Should error</div>
+            </div>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let diagnostics = document.diagnostics();
+
+        // Should have 3 errors for assignments in non-event attributes
+        assert_eq!(
+            diagnostics.len(),
+            3,
+            "Non-event attributes should reject assignments"
+        );
+
+        for diagnostic in &diagnostics {
+            assert!(diagnostic
+                .message
+                .contains("only allowed in event handlers"));
+        }
+    }
 }

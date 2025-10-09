@@ -111,8 +111,11 @@ impl ManifoldDocument {
             };
 
             let allow_inline_functions = Self::attribute_allows_inline_functions(attribute);
+            let allow_assignments = Self::attribute_allows_assignments(attribute);
 
-            if let Err(message) = validate_expression(expr, false, allow_inline_functions) {
+            if let Err(message) =
+                validate_expression(expr, allow_assignments, allow_inline_functions)
+            {
                 let range = Range::new(
                     self.line_index.position_at(start_offset),
                     self.line_index.position_at(end_offset),
@@ -136,6 +139,15 @@ impl ManifoldDocument {
     }
 
     fn attribute_allows_inline_functions(attribute: &ManifoldAttribute) -> bool {
+        if attribute.kind != ManifoldAttributeKind::Attribute {
+            return false;
+        }
+
+        let lower = attribute.name.to_ascii_lowercase();
+        lower.starts_with(":on") || lower.starts_with("data-mf-on")
+    }
+
+    fn attribute_allows_assignments(attribute: &ManifoldAttribute) -> bool {
         if attribute.kind != ManifoldAttributeKind::Attribute {
             return false;
         }

@@ -35,7 +35,7 @@ pub fn parse_expression(expr: &str) -> Result<(), String> {
 pub fn parse_expression_ast(expr: &str) -> Result<Box<Expr>, String> {
     let trimmed = expr.trim();
     if trimmed.is_empty() {
-        return Err("Empty expression".into());
+        return Err("Empty expression. Provide a valid Manifold expression such as a variable, property access, or simple operation.".into());
     }
 
     let cm: Lrc<SourceMap> = Default::default();
@@ -63,13 +63,13 @@ pub fn parse_expression_ast(expr: &str) -> Result<Box<Expr>, String> {
                 Ok(ast) => {
                     for err in parser.take_errors() {
                         err.into_diagnostic(&handler).emit();
-                        return Err("Failed to parse expression".into());
+                        return Err("Invalid expression syntax. Manifold expressions support literals, variables, property access, arithmetic/logical operations, ternary operators, function calls, and array/object literals. For complex logic, define functions in your Manifold state.".into());
                     }
                     Ok(ast)
                 }
                 Err(err) => {
                     err.into_diagnostic(&handler).emit();
-                    Err("Failed to parse expression".into())
+                    Err("Invalid expression syntax. Manifold expressions support literals, variables, property access, arithmetic/logical operations, ternary operators, function calls, and array/object literals. For complex logic, define functions in your Manifold state.".into())
                 }
             }
         })
@@ -185,20 +185,20 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
     match expr {
         Assign(assign) => {
             if !restrictions.allow_assignments {
-                return Err("Assignments are not allowed in this Manifold expression.".into());
+                return Err("Assignment expressions (=) are only allowed in event handlers like :onclick. For complex logic, define functions in your Manifold state and call them instead.".into());
             }
             check_expr(&assign.right, restrictions)
         }
         Update(update) => {
             if !restrictions.allow_assignments {
-                return Err("Assignments are not allowed in this Manifold expression.".into());
+                return Err("Increment/decrement operators (++, --) are only allowed in event handlers like :onclick. For complex logic, define functions in your Manifold state and call them instead.".into());
             }
             check_expr(&update.arg, restrictions)
         }
         Arrow(arrow) => {
             if !restrictions.allow_inline_functions {
                 return Err(
-                    "Inline functions are not supported in this Manifold expression.".into(),
+                    "Arrow functions are only supported in event handlers. For complex logic, define functions in your Manifold state and call them instead.".into(),
                 );
             }
             match &*arrow.body {
@@ -216,7 +216,7 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
         Fn(fn_expr) => {
             if !restrictions.allow_inline_functions {
                 return Err(
-                    "Inline functions are not supported in this Manifold expression.".into(),
+                    "Function expressions are only supported in event handlers. For complex logic, define functions in your Manifold state and call them instead.".into(),
                 );
             }
             if let Some(body) = &fn_expr.function.body {
@@ -229,6 +229,9 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
         Array(array) => {
             for elem in &array.elems {
                 if let Some(expr_or_spread) = elem {
+                    if expr_or_spread.spread.is_some() {
+                        return Err("The spread operator (...) is not supported in Manifold expressions. Define array composition logic in your Manifold state functions instead.".into());
+                    }
                     check_expr(&expr_or_spread.expr, restrictions)?;
                 }
             }
@@ -259,8 +262,35 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
             }
             Ok(())
         }
-        Unary(unary) => check_expr(&unary.arg, restrictions),
+        Unary(unary) => {
+            use swc_ecma_ast::UnaryOp;
+            match unary.op {
+                UnaryOp::TypeOf => {
+                    return Err("The 'typeof' operator is not supported in Manifold expressions. Handle type checking in your Manifold state functions instead.".into());
+                }
+                UnaryOp::Delete => {
+                    return Err("The 'delete' operator is not supported in Manifold expressions. Handle object modifications in your Manifold state functions instead.".into());
+                }
+                UnaryOp::Void => {
+                    return Err(
+                        "The 'void' operator is not supported in Manifold expressions.".into(),
+                    );
+                }
+                _ => {}
+            }
+            check_expr(&unary.arg, restrictions)
+        }
         Bin(bin) => {
+            use swc_ecma_ast::BinaryOp;
+            match bin.op {
+                BinaryOp::InstanceOf => {
+                    return Err("The 'instanceof' operator is not supported in Manifold expressions. Handle type checking in your Manifold state functions instead.".into());
+                }
+                BinaryOp::In => {
+                    return Err("The 'in' operator is not supported in Manifold expressions. Use property access with optional chaining (obj?.prop) or define checking logic in your Manifold state instead.".into());
+                }
+                _ => {}
+            }
             check_expr(&bin.left, restrictions)?;
             check_expr(&bin.right, restrictions)
         }
@@ -277,23 +307,23 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
         }
         Paren(paren) => check_expr(&paren.expr, restrictions),
         Tpl(tpl) => {
-            for expr in &tpl.exprs {
-                check_expr(expr, restrictions)?;
+            if !tpl.exprs.is_empty() {
+                return Err("Template literals with interpolation (`hello ${name}`) are not supported in Manifold expressions. Use string concatenation like 'Hello ' + name instead.".into());
             }
             Ok(())
         }
-        TaggedTpl(tagged) => {
-            check_expr(&tagged.tag, restrictions)?;
-            for expr in &tagged.tpl.exprs {
-                check_expr(expr, restrictions)?;
-            }
-            Ok(())
+        TaggedTpl(_) => {
+            return Err("Tagged template literals are not supported in Manifold expressions. Use string concatenation or define a function in your Manifold state instead.".into());
         }
         Member(member) => {
             check_expr(&member.obj, restrictions)?;
             match &member.prop {
                 ast::MemberProp::Computed(comp) => check_expr(&comp.expr, restrictions)?,
                 _ => {}
+            }
+            // Check for global access patterns
+            if let Some(global_error) = check_for_global_access(member) {
+                return Err(global_error);
             }
             Ok(())
         }
@@ -311,6 +341,38 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
         TsTypeAssertion(ts) => check_expr(&ts.expr, restrictions),
         TsInstantiation(ts) => check_expr(&ts.expr, restrictions),
         TsSatisfies(ts) => check_expr(&ts.expr, restrictions),
+        // Check for unsupported JavaScript features
+        PrivateName(_) => {
+            return Err(
+                "Private properties (#property) are not supported in Manifold expressions.".into(),
+            );
+        }
+        Class(_) => {
+            return Err("Class expressions are not supported in Manifold expressions. Define classes in your Manifold state instead.".into());
+        }
+        MetaProp(meta) => {
+            return Err(format!(
+                "Meta properties ({}) are not supported in Manifold expressions.",
+                if meta.kind == ast::MetaPropKind::NewTarget {
+                    "new.target"
+                } else {
+                    "import.meta"
+                }
+            ));
+        }
+        SuperProp(_) => {
+            return Err("The 'super' keyword is not supported in Manifold expressions.".into());
+        }
+        This(_) => {
+            return Err("The 'this' keyword is not supported in Manifold expressions. Use variables from your Manifold state instead.".into());
+        }
+        Ident(ident) => {
+            // Check for global identifiers
+            if let Some(global_error) = check_for_global_identifier(ident) {
+                return Err(global_error);
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -324,13 +386,8 @@ fn check_stmt(stmt: &ast::Stmt, restrictions: &Restrictions) -> Result<(), Strin
             }
             Ok(())
         }
-        ast::Stmt::If(if_stmt) => {
-            check_expr(&if_stmt.test, restrictions)?;
-            check_stmt(&if_stmt.cons, restrictions)?;
-            if let Some(alt) = &if_stmt.alt {
-                check_stmt(alt, restrictions)?;
-            }
-            Ok(())
+        ast::Stmt::If(_) => {
+            return Err("If statements are not supported in Manifold expressions. Use ternary operators (condition ? value1 : value2) instead, or define logic in your Manifold state.".into());
         }
         ast::Stmt::Block(block) => {
             for stmt in &block.stmts {
@@ -338,66 +395,32 @@ fn check_stmt(stmt: &ast::Stmt, restrictions: &Restrictions) -> Result<(), Strin
             }
             Ok(())
         }
-        ast::Stmt::While(while_stmt) => {
-            check_expr(&while_stmt.test, restrictions)?;
-            check_stmt(&while_stmt.body, restrictions)
+        ast::Stmt::While(_) => {
+            return Err("While loops are not supported in Manifold expressions. Define loop logic in your Manifold state functions instead.".into());
         }
-        ast::Stmt::DoWhile(do_while) => {
-            check_stmt(&do_while.body, restrictions)?;
-            check_expr(&do_while.test, restrictions)
+        ast::Stmt::DoWhile(_) => {
+            return Err("Do-while loops are not supported in Manifold expressions. Define loop logic in your Manifold state functions instead.".into());
         }
-        ast::Stmt::For(for_stmt) => {
-            if let Some(init) = &for_stmt.init {
-                match init {
-                    ast::VarDeclOrExpr::VarDecl(var_decl) => {
-                        for decl in &var_decl.decls {
-                            if let Some(init_expr) = &decl.init {
-                                check_expr(init_expr, restrictions)?;
-                            }
-                        }
-                    }
-                    ast::VarDeclOrExpr::Expr(expr) => {
-                        check_expr(expr, restrictions)?;
-                    }
-                }
-            }
-            if let Some(test) = &for_stmt.test {
-                check_expr(test, restrictions)?;
-            }
-            if let Some(update) = &for_stmt.update {
-                check_expr(update, restrictions)?;
-            }
-            check_stmt(&for_stmt.body, restrictions)
+        ast::Stmt::For(_) => {
+            return Err("For loops are not supported in Manifold expressions. Use the :each directive for iteration, or define loop logic in your Manifold state functions.".into());
         }
-        ast::Stmt::ForOf(for_of) => {
-            check_expr(&for_of.right, restrictions)?;
-            check_stmt(&for_of.body, restrictions)
+        ast::Stmt::ForOf(_) => {
+            return Err("For-of loops are not supported in Manifold expressions. Use the :each directive for iteration, or define loop logic in your Manifold state functions.".into());
         }
-        ast::Stmt::ForIn(for_in) => {
-            check_expr(&for_in.right, restrictions)?;
-            check_stmt(&for_in.body, restrictions)
+        ast::Stmt::ForIn(_) => {
+            return Err("For-in loops are not supported in Manifold expressions. Use the :each directive for iteration, or define loop logic in your Manifold state functions.".into());
         }
-        ast::Stmt::Switch(switch_stmt) => {
-            check_expr(&switch_stmt.discriminant, restrictions)?;
-            for case in &switch_stmt.cases {
-                if let Some(test) = &case.test {
-                    check_expr(test, restrictions)?;
-                }
-                for stmt in &case.cons {
-                    check_stmt(stmt, restrictions)?;
-                }
-            }
-            Ok(())
+        ast::Stmt::Switch(_) => {
+            return Err("Switch statements are not supported in Manifold expressions. Use ternary operators or define the logic in your Manifold state functions instead.".into());
         }
-        ast::Stmt::Try(try_stmt) => {
-            check_block_stmt_or_stmts(&try_stmt.block, restrictions)?;
-            if let Some(catch) = &try_stmt.handler {
-                check_block_stmt_or_stmts(&catch.body, restrictions)?;
-            }
-            if let Some(finalizer) = &try_stmt.finalizer {
-                check_block_stmt_or_stmts(finalizer, restrictions)?;
-            }
-            Ok(())
+        ast::Stmt::Try(_) => {
+            return Err("Try-catch statements are not supported in Manifold expressions. Handle errors in your Manifold state functions instead.".into());
+        }
+        ast::Stmt::Throw(_) => {
+            return Err("Throw statements are not supported in Manifold expressions. Handle errors in your Manifold state functions instead.".into());
+        }
+        ast::Stmt::Decl(_) => {
+            return Err("Declarations are not supported in Manifold expressions. Define functions and variables in your Manifold state instead.".into());
         }
         _ => Ok(()),
     }
@@ -423,7 +446,7 @@ fn check_prop_or_spread(
             ast::Prop::Method(method) => {
                 if !restrictions.allow_inline_functions {
                     return Err(
-                        "Inline functions are not supported in this Manifold expression.".into(),
+                        "Object methods are only supported in event handlers. For complex logic, define functions in your Manifold state and call them instead.".into(),
                     );
                 }
                 if let Some(body) = &method.function.body {
@@ -436,7 +459,7 @@ fn check_prop_or_spread(
             ast::Prop::Getter(getter) => {
                 if !restrictions.allow_inline_functions {
                     return Err(
-                        "Inline functions are not supported in this Manifold expression.".into(),
+                        "Object getters are only supported in event handlers. For complex logic, define functions in your Manifold state and call them instead.".into(),
                     );
                 }
                 if let Some(body) = &getter.body {
@@ -447,7 +470,7 @@ fn check_prop_or_spread(
             ast::Prop::Setter(setter) => {
                 if !restrictions.allow_inline_functions {
                     return Err(
-                        "Inline functions are not supported in this Manifold expression.".into(),
+                        "Object setters are only supported in event handlers. For complex logic, define functions in your Manifold state and call them instead.".into(),
                     );
                 }
                 if let Some(body) = &setter.body {
@@ -458,7 +481,9 @@ fn check_prop_or_spread(
             ast::Prop::Assign(assign) => check_expr(&assign.value, restrictions),
             ast::Prop::Shorthand(_) => Ok(()),
         },
-        ast::PropOrSpread::Spread(spread) => check_expr(&spread.expr, restrictions),
+        ast::PropOrSpread::Spread(_) => {
+            return Err("The spread operator (...) is not supported in Manifold expressions. Define object composition logic in your Manifold state functions instead.".into());
+        }
     }
 }
 
@@ -480,5 +505,60 @@ fn check_opt_chain(opt: &ast::OptChainExpr, restrictions: &Restrictions) -> Resu
             }
             Ok(())
         }
+    }
+}
+
+fn check_for_global_access(member: &ast::MemberExpr) -> Option<String> {
+    // Check if this is accessing a known global object
+    if let ast::Expr::Ident(ident) = &*member.obj {
+        let name = ident.sym.as_str();
+        match name {
+            "Math" => {
+                return Some("Math functions are not available in Manifold expressions. Define mathematical operations in your Manifold state functions instead.".into());
+            }
+            "Date" => {
+                return Some("Date functions are not available in Manifold expressions. Define date operations in your Manifold state functions instead.".into());
+            }
+            "window" => {
+                return Some("Window object is not available in Manifold expressions. Define browser interactions in your Manifold state functions instead.".into());
+            }
+            "document" => {
+                return Some("Document object is not available in Manifold expressions. Use Manifold directives for DOM manipulation instead.".into());
+            }
+            "console" => {
+                return Some("Console functions are not available in Manifold expressions. Use console methods in your Manifold state functions for debugging instead.".into());
+            }
+            "JSON" => {
+                return Some("JSON functions are not available in Manifold expressions. Define JSON operations in your Manifold state functions instead.".into());
+            }
+            "localStorage" | "sessionStorage" => {
+                return Some("Storage APIs are not available in Manifold expressions. Define storage operations in your Manifold state functions instead.".into());
+            }
+            "fetch" => {
+                return Some("Fetch API is not available in Manifold expressions. Define API calls in your Manifold state functions instead.".into());
+            }
+            "setTimeout" | "setInterval" | "clearTimeout" | "clearInterval" => {
+                return Some("Timer functions are not available in Manifold expressions. Define timer logic in your Manifold state functions instead.".into());
+            }
+            "alert" | "confirm" | "prompt" => {
+                return Some("Browser dialog functions are not available in Manifold expressions. Define user interactions in your Manifold state functions instead.".into());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn check_for_global_identifier(ident: &ast::Ident) -> Option<String> {
+    let name = ident.sym.as_str();
+    match name {
+        "Math" | "Date" | "window" | "document" | "console" | "JSON" | 
+        "localStorage" | "sessionStorage" | "fetch" | "setTimeout" | 
+        "setInterval" | "clearTimeout" | "clearInterval" | "alert" | 
+        "confirm" | "prompt" | "Array" | "Object" | "String" | "Number" | 
+        "Boolean" | "RegExp" | "Error" | "Promise" => {
+            Some(format!("Global '{}' is not available in Manifold expressions. Define this functionality in your Manifold state functions instead.", name))
+        }
+        _ => None
     }
 }
