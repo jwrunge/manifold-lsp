@@ -305,6 +305,14 @@ mod tests {
                 <button :onchange="value = 'new'">Change</button>
                 <button data-mf-onclick="items.push(newItem)">Add Item</button>
             </div>
+            <script type="module">
+                const state = Manifold.create()
+                    .add("count", 0)
+                    .add("value", "old")
+                    .add("items", [])
+                    .add("newItem", "item")
+                    .build();
+            </script>
         "#;
 
         let document = ManifoldDocument::parse(html);
@@ -343,5 +351,144 @@ mod tests {
                 .message
                 .contains("only allowed in event handlers"));
         }
+    }
+
+    #[test]
+    fn detects_unknown_variable_references() {
+        let html = r#"
+            <div data-mf-register>
+                <div :text="unknownVar">Should error</div>
+                <div :if="anotherUnknown > 5">Should error</div>
+                <div>${missingVariable}</div>
+            </div>
+            <script type="module">
+                const state = Manifold.create()
+                    .add("knownVar", "value")
+                    .build();
+            </script>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let diagnostics = document.diagnostics();
+
+        // Should have 3 errors for unknown variables
+        assert_eq!(
+            diagnostics.len(),
+            3,
+            "Should detect unknown variable references"
+        );
+
+        for diagnostic in &diagnostics {
+            assert!(diagnostic.message.contains("Unknown variable"));
+            assert!(diagnostic
+                .message
+                .contains("must be defined in your Manifold state"));
+        }
+    }
+
+    #[test]
+    fn allows_known_variables_and_locals() {
+        let html = r#"
+            <div data-mf-register>
+                <div :text="knownVar">Valid reference</div>
+                <div :if="count > 0">Valid reference</div>
+                <ul>
+                    <li :each="items as item, index">
+                        <span :text="item">Valid local</span>
+                        <span :text="index">Valid index</span>
+                    </li>
+                </ul>
+            </div>
+            <script type="module">
+                const state = Manifold.create()
+                    .add("knownVar", "value")
+                    .add("count", 0)
+                    .add("items", ["a", "b"])
+                    .build();
+            </script>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let diagnostics = document.diagnostics();
+
+        // Should have no errors for valid variable references
+        assert!(
+            diagnostics.is_empty(),
+            "Known variables should not cause errors: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn provides_specific_syntax_error_messages() {
+        let html = r#"
+            <div data-mf-register>
+                <div :text="'unterminated string">Should error</div>
+                <div :text="missing )">Should error</div>
+                <div :text="[unclosed bracket">Should error</div>
+                <div :text="{unclosed: brace">Should error</div>
+                <div :text="invalid === = syntax">Should error</div>
+            </div>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let diagnostics = document.diagnostics();
+
+        // Should have syntax errors
+        assert!(!diagnostics.is_empty(), "Should detect syntax errors");
+
+        // Check that we get specific error messages
+        let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        // Look for specific syntax error indicators
+        let has_string_error = messages
+            .iter()
+            .any(|msg| msg.contains("string") || msg.contains("quote"));
+        let has_bracket_error = messages.iter().any(|msg| {
+            msg.contains("bracket") || msg.contains("parenthes") || msg.contains("brace")
+        });
+
+        assert!(
+            has_string_error || has_bracket_error,
+            "Should provide specific syntax error messages: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn handles_mixed_state_contexts() {
+        let html = r#"
+            <div data-mf-register>
+                <div :text="globalVar">Should be valid</div>
+            </div>
+            <div data-mf-register="namedState">
+                <div :text="localVar">Should be valid</div>
+                <div :text="globalVar">Should also be valid (fallback)</div>
+                <div :text="unknownVar">Should error</div>
+            </div>
+            <script type="module">
+                const globalState = Manifold.create()
+                    .add("globalVar", "global")
+                    .build();
+                    
+                const namedState = Manifold.create("namedState")
+                    .add("localVar", "local")
+                    .build();
+            </script>
+        "#;
+
+        let document = ManifoldDocument::parse(html);
+        let diagnostics = document.diagnostics();
+
+        // Should have 1 error for the unknown variable
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Should detect only the unknown variable: {:?}",
+            diagnostics
+        );
+
+        assert!(diagnostics[0].message.contains("unknownVar"));
+        assert!(diagnostics[0].message.contains("Unknown variable"));
     }
 }

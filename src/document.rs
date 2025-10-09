@@ -2,7 +2,8 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 use super::attribute::{ManifoldAttribute, ManifoldAttributeKind, ParsedAttribute};
 use super::expression::{
-    tokenize_expression, validate_expression, ExpressionToken, ExpressionTokenKind,
+    tokenize_expression, validate_expression_with_context, 
+    ValidationContext, ExpressionToken, ExpressionTokenKind,
 };
 use super::lineindex::LineIndex;
 use std::collections::HashMap;
@@ -113,9 +114,23 @@ impl ManifoldDocument {
             let allow_inline_functions = Self::attribute_allows_inline_functions(attribute);
             let allow_assignments = Self::attribute_allows_assignments(attribute);
 
-            if let Err(message) =
-                validate_expression(expr, allow_assignments, allow_inline_functions)
-            {
+            // Create validation context
+            let context = ValidationContext {
+                state_name: attribute.state_name.as_deref(),
+                states: &self.states,
+                locals: &attribute.locals,
+            };
+
+            // Skip variable reference validation for :each expressions since they have special syntax
+            let skip_variable_validation = attribute.name.to_ascii_lowercase() == ":each" 
+                || attribute.name.to_ascii_lowercase() == "data-mf-each";
+
+            if let Err(message) = validate_expression_with_context(
+                expr, 
+                allow_assignments, 
+                allow_inline_functions, 
+                if skip_variable_validation { None } else { Some(&context) }
+            ) {
                 let range = Range::new(
                     self.line_index.position_at(start_offset),
                     self.line_index.position_at(end_offset),

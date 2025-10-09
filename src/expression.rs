@@ -12,6 +12,8 @@ use swc_ecma_parser::{
     Parser, StringInput, Syntax, TsConfig,
 };
 
+use crate::state::{ManifoldStates, StateVariable};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpressionTokenKind {
     Keyword,
@@ -26,6 +28,13 @@ pub struct ExpressionToken {
     pub start: usize,
     pub end: usize,
     pub kind: ExpressionTokenKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidationContext<'a> {
+    pub state_name: Option<&'a str>,
+    pub states: &'a ManifoldStates,
+    pub locals: &'a [StateVariable],
 }
 
 pub fn parse_expression(expr: &str) -> Result<(), String> {
@@ -61,15 +70,16 @@ pub fn parse_expression_ast(expr: &str) -> Result<Box<Expr>, String> {
             let mut parser = Parser::new_from(lexer);
             match parser.parse_expr() {
                 Ok(ast) => {
-                    for err in parser.take_errors() {
-                        err.into_diagnostic(&handler).emit();
-                        return Err("Invalid expression syntax. Manifold expressions support literals, variables, property access, arithmetic/logical operations, ternary operators, function calls, and array/object literals. For complex logic, define functions in your Manifold state.".into());
+                    let errors = parser.take_errors();
+                    if !errors.is_empty() {
+                        // Provide specific error messages based on common syntax errors
+                        return Err(analyze_syntax_errors(&errors, trimmed));
                     }
                     Ok(ast)
                 }
                 Err(err) => {
-                    err.into_diagnostic(&handler).emit();
-                    Err("Invalid expression syntax. Manifold expressions support literals, variables, property access, arithmetic/logical operations, ternary operators, function calls, and array/object literals. For complex logic, define functions in your Manifold state.".into())
+                    // Analyze the error to provide better feedback
+                    Err(analyze_parse_error(&err, trimmed))
                 }
             }
         })
@@ -87,6 +97,140 @@ pub fn validate_expression(
         allow_inline_functions,
     };
     check_expr(&ast, &restrictions)
+}
+
+pub fn validate_expression_with_context(
+    expr: &str,
+    allow_assignments: bool,
+    allow_inline_functions: bool,
+    context: Option<&ValidationContext>,
+) -> Result<(), String> {
+    let ast = parse_expression_ast(expr)?;
+    let restrictions = Restrictions {
+        allow_assignments,
+        allow_inline_functions,
+    };
+
+    // First check structural validation (existing rules)
+    check_expr(&ast, &restrictions)?;
+
+    // Then check variable references if context is provided
+    if let Some(ctx) = context {
+        check_variable_references(&ast, ctx)?;
+    }
+
+    Ok(())
+}
+
+fn format_syntax_error(error_output: &str) -> String {
+    // Parse the error output to extract meaningful information
+    if error_output.contains("Unexpected token") {
+        if error_output.contains("Expected") {
+            // Try to extract what was expected
+            if let Some(expected_start) = error_output.find("Expected") {
+                if let Some(line_end) = error_output[expected_start..].find('\n') {
+                    let expected_msg = &error_output[expected_start..expected_start + line_end];
+                    return format!("Syntax error: {}. Manifold expressions support basic JavaScript syntax like variables, property access, and simple operations.", expected_msg.trim());
+                }
+            }
+        }
+        return "Syntax error: Unexpected token. Check your expression syntax - Manifold supports variables, property access, function calls, and basic operations.".into();
+    }
+
+    if error_output.contains("Expected expression") {
+        return "Syntax error: Expected an expression. Manifold expressions should be valid JavaScript expressions like variables, calculations, or function calls.".into();
+    }
+
+    if error_output.contains("Unterminated") {
+        if error_output.contains("string") {
+            return "Syntax error: Unterminated string literal. Make sure to close your quotes."
+                .into();
+        }
+        return "Syntax error: Unterminated expression. Check for missing closing brackets, parentheses, or quotes.".into();
+    }
+
+    if error_output.contains("Expected") && error_output.contains("but found") {
+        return "Syntax error: Unexpected character or token. Check your expression syntax.".into();
+    }
+
+    // If we can't parse the specific error, provide a helpful generic message
+    "Invalid expression syntax. Manifold expressions support literals, variables, property access, arithmetic/logical operations, ternary operators, function calls, and array/object literals. For complex logic, define functions in your Manifold state.".into()
+}
+
+fn analyze_syntax_errors(errors: &[swc_ecma_parser::error::Error], expr: &str) -> String {
+    // Analyze common syntax errors and provide helpful feedback
+    for error in errors {
+        let error_msg = format!("{:?}", error);
+
+        if error_msg.contains("UnterminatedStr") {
+            return "Syntax error: Unterminated string literal. Make sure to close your quotes."
+                .into();
+        }
+
+        if error_msg.contains("Expected") || error_msg.contains("expected") {
+            if error_msg.contains("';'") {
+                return "Syntax error: Unexpected semicolon. Manifold expressions should not end with semicolons.".into();
+            }
+            if error_msg.contains("')'") {
+                return "Syntax error: Missing closing parenthesis ')'.".into();
+            }
+            if error_msg.contains("']'") {
+                return "Syntax error: Missing closing bracket ']'.".into();
+            }
+            if error_msg.contains("'}'") {
+                return "Syntax error: Missing closing brace '}'.".into();
+            }
+        }
+
+        if error_msg.contains("Unexpected") {
+            if expr.contains("=")
+                && !expr.contains("==")
+                && !expr.contains("===")
+                && !expr.contains("!=")
+                && !expr.contains("!==")
+                && !expr.contains(">=")
+                && !expr.contains("<=")
+            {
+                return "Syntax error: Assignment operators are only allowed in event handlers like :onclick.".into();
+            }
+            return "Syntax error: Unexpected token. Check your expression syntax.".into();
+        }
+    }
+
+    "Invalid expression syntax. Check for common issues like unmatched brackets, unterminated strings, or unsupported syntax.".into()
+}
+
+fn analyze_parse_error(error: &swc_ecma_parser::error::Error, expr: &str) -> String {
+    let error_msg = format!("{:?}", error);
+
+    // Check for common patterns in the expression that might help identify the issue
+    if expr.contains("'") && (expr.matches("'").count() % 2 != 0) {
+        return "Syntax error: Unterminated string literal with single quotes. Make sure to close your quotes.".into();
+    }
+
+    if expr.contains("\"") && (expr.matches("\"").count() % 2 != 0) {
+        return "Syntax error: Unterminated string literal with double quotes. Make sure to close your quotes.".into();
+    }
+
+    if expr.contains("(") && expr.matches("(").count() != expr.matches(")").count() {
+        return "Syntax error: Unmatched parentheses. Check that every '(' has a corresponding ')'.".into();
+    }
+
+    if expr.contains("[") && expr.matches("[").count() != expr.matches("]").count() {
+        return "Syntax error: Unmatched brackets. Check that every '[' has a corresponding ']'."
+            .into();
+    }
+
+    if expr.contains("{") && expr.matches("{").count() != expr.matches("}").count() {
+        return "Syntax error: Unmatched braces. Check that every '{' has a corresponding '}'."
+            .into();
+    }
+
+    if error_msg.contains("Expected") {
+        return "Syntax error: Invalid expression structure. Manifold expressions should be valid JavaScript expressions.".into();
+    }
+
+    "Invalid expression syntax. Manifold expressions support literals, variables, property access, arithmetic/logical operations, ternary operators, function calls, and array/object literals.".into()
 }
 
 pub fn tokenize_expression(expr: &str) -> Vec<ExpressionToken> {
@@ -485,6 +629,250 @@ fn check_prop_or_spread(
             return Err("The spread operator (...) is not supported in Manifold expressions. Define object composition logic in your Manifold state functions instead.".into());
         }
     }
+}
+
+fn check_variable_references(expr: &Expr, context: &ValidationContext) -> Result<(), String> {
+    visit_expr_for_identifiers(expr, context)
+}
+
+fn visit_expr_for_identifiers(expr: &Expr, context: &ValidationContext) -> Result<(), String> {
+    use ast::Expr::*;
+
+    match expr {
+        Ident(ident) => {
+            validate_identifier_reference(ident, context)?;
+            Ok(())
+        }
+        Member(member) => {
+            visit_expr_for_identifiers(&member.obj, context)?;
+            if let ast::MemberProp::Computed(comp) = &member.prop {
+                visit_expr_for_identifiers(&comp.expr, context)?;
+            }
+            Ok(())
+        }
+        Call(call) => {
+            match &call.callee {
+                ast::Callee::Expr(expr) => visit_expr_for_identifiers(expr, context)?,
+                _ => {}
+            }
+            for arg in &call.args {
+                visit_expr_for_identifiers(&arg.expr, context)?;
+            }
+            Ok(())
+        }
+        Bin(bin) => {
+            visit_expr_for_identifiers(&bin.left, context)?;
+            visit_expr_for_identifiers(&bin.right, context)?;
+            Ok(())
+        }
+        Unary(unary) => {
+            visit_expr_for_identifiers(&unary.arg, context)?;
+            Ok(())
+        }
+        Assign(assign) => {
+            // For assignments, we only check the right side for variable references
+            // The left side is the target being assigned to
+            visit_expr_for_identifiers(&assign.right, context)?;
+            Ok(())
+        }
+        Update(update) => {
+            visit_expr_for_identifiers(&update.arg, context)?;
+            Ok(())
+        }
+        Cond(cond) => {
+            visit_expr_for_identifiers(&cond.test, context)?;
+            visit_expr_for_identifiers(&cond.cons, context)?;
+            visit_expr_for_identifiers(&cond.alt, context)?;
+            Ok(())
+        }
+        Array(array) => {
+            for elem in &array.elems {
+                if let Some(expr_or_spread) = elem {
+                    visit_expr_for_identifiers(&expr_or_spread.expr, context)?;
+                }
+            }
+            Ok(())
+        }
+        Object(object) => {
+            for prop in &object.props {
+                visit_prop_for_identifiers(prop, context)?;
+            }
+            Ok(())
+        }
+        Paren(paren) => visit_expr_for_identifiers(&paren.expr, context),
+        Seq(seq) => {
+            for expr in &seq.exprs {
+                visit_expr_for_identifiers(expr, context)?;
+            }
+            Ok(())
+        }
+        OptChain(opt) => visit_opt_chain_for_identifiers(opt, context),
+        // Literals and other expressions that don't contain identifiers
+        Lit(_) | This(_) | Arrow(_) | Fn(_) | Class(_) | Tpl(_) | TaggedTpl(_) | Yield(_)
+        | Await(_) | New(_) | MetaProp(_) | SuperProp(_) | PrivateName(_) | TsAs(_)
+        | TsConstAssertion(_) | TsNonNull(_) | TsTypeAssertion(_) | TsInstantiation(_)
+        | TsSatisfies(_) | Invalid(_) | JSXMember(_) | JSXNamespacedName(_) | JSXEmpty(_)
+        | JSXElement(_) | JSXFragment(_) => Ok(()),
+    }
+}
+
+fn visit_prop_for_identifiers(
+    prop: &ast::PropOrSpread,
+    context: &ValidationContext,
+) -> Result<(), String> {
+    match prop {
+        ast::PropOrSpread::Prop(prop) => match &**prop {
+            ast::Prop::KeyValue(kv) => visit_expr_for_identifiers(&kv.value, context),
+            ast::Prop::Shorthand(ident) => validate_identifier_reference(ident, context),
+            ast::Prop::Method(method) => {
+                if let Some(body) = &method.function.body {
+                    for stmt in &body.stmts {
+                        visit_stmt_for_identifiers(stmt, context)?;
+                    }
+                }
+                Ok(())
+            }
+            ast::Prop::Getter(getter) => {
+                if let Some(body) = &getter.body {
+                    for stmt in &body.stmts {
+                        visit_stmt_for_identifiers(stmt, context)?;
+                    }
+                }
+                Ok(())
+            }
+            ast::Prop::Setter(setter) => {
+                if let Some(body) = &setter.body {
+                    for stmt in &body.stmts {
+                        visit_stmt_for_identifiers(stmt, context)?;
+                    }
+                }
+                Ok(())
+            }
+            ast::Prop::Assign(assign) => visit_expr_for_identifiers(&assign.value, context),
+        },
+        ast::PropOrSpread::Spread(spread) => visit_expr_for_identifiers(&spread.expr, context),
+    }
+}
+
+fn visit_stmt_for_identifiers(stmt: &ast::Stmt, context: &ValidationContext) -> Result<(), String> {
+    match stmt {
+        ast::Stmt::Expr(expr_stmt) => visit_expr_for_identifiers(&expr_stmt.expr, context),
+        ast::Stmt::Return(ret) => {
+            if let Some(arg) = &ret.arg {
+                visit_expr_for_identifiers(arg, context)?;
+            }
+            Ok(())
+        }
+        ast::Stmt::Block(block) => {
+            for stmt in &block.stmts {
+                visit_stmt_for_identifiers(stmt, context)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn visit_opt_chain_for_identifiers(
+    opt: &ast::OptChainExpr,
+    context: &ValidationContext,
+) -> Result<(), String> {
+    use ast::OptChainBase;
+
+    match &*opt.base {
+        OptChainBase::Member(member) => {
+            visit_expr_for_identifiers(&member.obj, context)?;
+            if let ast::MemberProp::Computed(comp) = &member.prop {
+                visit_expr_for_identifiers(&comp.expr, context)?;
+            }
+            Ok(())
+        }
+        OptChainBase::Call(call) => {
+            visit_expr_for_identifiers(&call.callee, context)?;
+            for arg in &call.args {
+                visit_expr_for_identifiers(&arg.expr, context)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_identifier_reference(
+    ident: &ast::Ident,
+    context: &ValidationContext,
+) -> Result<(), String> {
+    let name = ident.sym.as_str();
+
+    // Skip validation for known globals that we already handle elsewhere
+    if is_known_global(name) {
+        return Ok(());
+    }
+
+    // Check if it's in local variables (from :each bindings)
+    if context.locals.iter().any(|var| var.name == name) {
+        return Ok(());
+    }
+
+    // Check if it's in the current state
+    if let Some(state_name) = context.state_name {
+        if let Some(state) = context.states.get(state_name) {
+            if state.property_type(name).is_some() {
+                return Ok(());
+            }
+        }
+    }
+
+    // Check if it's in the default state
+    if let Some(default_state) = context.states.get("default") {
+        if default_state.property_type(name).is_some() {
+            return Ok(());
+        }
+    }
+
+    // If we get here, the variable is not found
+    Err(format!(
+        "Unknown variable '{}'. Variables must be defined in your Manifold state{}.",
+        name,
+        if context.state_name.is_some() {
+            format!(" or available in the current scope")
+        } else {
+            String::new()
+        }
+    ))
+}
+
+fn is_known_global(name: &str) -> bool {
+    matches!(
+        name,
+        "Math"
+            | "Date"
+            | "window"
+            | "document"
+            | "console"
+            | "JSON"
+            | "localStorage"
+            | "sessionStorage"
+            | "fetch"
+            | "setTimeout"
+            | "setInterval"
+            | "clearTimeout"
+            | "clearInterval"
+            | "alert"
+            | "confirm"
+            | "prompt"
+            | "Array"
+            | "Object"
+            | "String"
+            | "Number"
+            | "Boolean"
+            | "RegExp"
+            | "Error"
+            | "Promise"
+            | "undefined"
+            | "null"
+            | "true"
+            | "false"
+    )
 }
 
 fn check_opt_chain(opt: &ast::OptChainExpr, restrictions: &Restrictions) -> Result<(), String> {
