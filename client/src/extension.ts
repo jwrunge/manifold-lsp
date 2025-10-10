@@ -18,6 +18,9 @@ import {
 	DocumentSelector,
 	TextDocument,
 	Range,
+	CompletionTriggerKind,
+	StatusBarAlignment,
+	StatusBarItem,
 } from "vscode";
 
 import {
@@ -70,6 +73,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
 		},
 	});
 	activateInlayHints(context, client, selectors);
+	activateCompletions(context, client, selectors);
 }
 
 type SelectorConfig = {
@@ -215,6 +219,171 @@ function isTypeHintsEnabled(): boolean {
 	return workspace
 		.getConfiguration("manifoldLanguageServer")
 		.get<boolean>("typeHints.enabled", true);
+}
+
+export function activateCompletions(
+	ctx: ExtensionContext,
+	languageClient: LanguageClient,
+	selectors: DocumentSelector
+): void {
+	const triggerCharacters = [".", "{", '"'];
+	const statusBar = window.createStatusBarItem(
+		"manifoldAutoSuggestions",
+		StatusBarAlignment.Right,
+		100
+	);
+	statusBar.command = "manifoldLanguageServer.toggleCompletionAutoTrigger";
+	ctx.subscriptions.push(statusBar);
+
+	const updateStatusBar = () => {
+		if (isCompletionAutoTriggerEnabled()) {
+			statusBar.text = "Manifold Auto Suggs: On";
+			statusBar.tooltip =
+				"Click to disable auto-triggered Manifold completions (still available via Ctrl+Space).";
+		} else {
+			statusBar.text = "Manifold Auto Suggs: Off";
+			statusBar.tooltip =
+				"Click to re-enable auto-triggered Manifold completions.";
+		}
+		statusBar.show();
+	};
+
+	updateStatusBar();
+
+	ctx.subscriptions.push(
+		workspace.onDidChangeConfiguration((event) => {
+			if (
+				event.affectsConfiguration(
+					"manifoldLanguageServer.completions.autoTrigger"
+				)
+			) {
+				updateStatusBar();
+			}
+		})
+	);
+
+	ctx.subscriptions.push(
+		languages.registerCompletionItemProvider(
+			selectors,
+			{
+				async provideCompletionItems(
+					document,
+					position,
+					token,
+					context
+				) {
+					if (
+						context.triggerKind ===
+							CompletionTriggerKind.TriggerCharacter &&
+						!isCompletionAutoTriggerEnabled()
+					) {
+						return undefined;
+					}
+
+					if (
+						context.triggerKind ===
+							CompletionTriggerKind.TriggerCharacter &&
+						context.triggerCharacter === "{" &&
+						position.character >= 1
+					) {
+						const preceding = document.getText(
+							new Range(position.translate(0, -1), position)
+						);
+						if (preceding !== "$") {
+							return undefined;
+						}
+					}
+
+					if (
+						context.triggerKind ===
+							CompletionTriggerKind.TriggerCharacter &&
+						context.triggerCharacter === '"'
+					) {
+						const linePrefix = document.getText(
+							new Range(position.with(undefined, 0), position)
+						);
+						const attributeMatch = linePrefix.match(
+							/([\w:.$-]+)\s*=\s*(?:["'][^"']*)?$/
+						);
+						const attributeName = attributeMatch?.[1] ?? "";
+						if (
+							attributeName.length > 0 &&
+							!attributeName.startsWith(":") &&
+							!attributeName.startsWith("data-mf")
+						) {
+							return undefined;
+						}
+					}
+
+					try {
+						const params = {
+							textDocument:
+								languageClient.code2ProtocolConverter.asTextDocumentIdentifier(
+									document
+								),
+							position:
+								languageClient.code2ProtocolConverter.asPosition(
+									position
+								),
+						};
+
+						const response = (await languageClient.sendRequest(
+							"textDocument/completion",
+							params,
+							token
+						)) as unknown;
+						if (!response) {
+							return undefined;
+						}
+
+						return languageClient.protocol2CodeConverter.asCompletionResult(
+							response as any
+						);
+					} catch (error) {
+						console.error(
+							"Failed to fetch Manifold completions",
+							error
+						);
+						return undefined;
+					}
+				},
+			},
+			...triggerCharacters
+		)
+	);
+
+	ctx.subscriptions.push(
+		commands.registerCommand(
+			"manifoldLanguageServer.toggleCompletionAutoTrigger",
+			async () => {
+				const config = workspace.getConfiguration(
+					"manifoldLanguageServer"
+				);
+				const enabled = config.get<boolean>(
+					"completions.autoTrigger",
+					true
+				);
+				const next = !enabled;
+				await config.update(
+					"completions.autoTrigger",
+					next,
+					ConfigurationTarget.Global
+				);
+				updateStatusBar();
+				void window.showInformationMessage(
+					next
+						? "Manifold auto suggestions enabled."
+						: "Manifold auto suggestions disabled; use Ctrl+Space to request completions."
+				);
+			}
+		)
+	);
+}
+
+function isCompletionAutoTriggerEnabled(): boolean {
+	return workspace
+		.getConfiguration("manifoldLanguageServer")
+		.get<boolean>("completions.autoTrigger", true);
 }
 
 function convertInlayHint(

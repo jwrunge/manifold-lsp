@@ -73,7 +73,7 @@ impl ManifoldDocument {
         let offset = self.line_index.offset_at(position)?;
         self.attributes
             .iter()
-            .find(|attr| offset >= attr.start_offset && offset < attr.end_offset)
+            .find(|attr| offset >= attr.start_offset && offset <= attr.end_offset)
     }
 
     pub fn semantic_tokens(&self) -> Vec<DocumentSemanticToken> {
@@ -652,8 +652,14 @@ impl<'a> TagScanner<'a> {
                     Some((value_start, value_end)) if value_end > value_start => {
                         let raw = &self.text[value_start..value_end];
                         let trimmed = raw.trim();
+
                         if trimmed.is_empty() {
-                            (value_start, value_end, None, None)
+                            (
+                                value_start,
+                                value_end,
+                                None,
+                                Some((value_start, value_start)),
+                            )
                         } else {
                             let rel_start = raw
                                 .find(trimmed)
@@ -668,6 +674,12 @@ impl<'a> TagScanner<'a> {
                             )
                         }
                     }
+                    Some((value_start, value_end)) => (
+                        value_start,
+                        value_end,
+                        None,
+                        Some((value_start, value_start)),
+                    ),
                     _ => (attr.span_start, attr.span_end, None, None),
                 };
 
@@ -710,6 +722,7 @@ impl<'a> TagScanner<'a> {
                     range,
                     start_offset: start,
                     end_offset: end,
+                    value_range: attr.value_range,
                     kind: ManifoldAttributeKind::Attribute,
                     expression,
                     expression_span,
@@ -785,12 +798,14 @@ impl<'a> TagScanner<'a> {
             let expr_start = search_idx + rel;
             let mut cursor = expr_start + 2;
             let mut brace_depth = 0i32;
+            let mut found_closing = false;
             while cursor < end {
                 match self.bytes[cursor] {
                     b'{' => brace_depth += 1,
                     b'}' => {
                         if brace_depth == 0 {
                             cursor += 1;
+                            found_closing = true;
                             break;
                         } else {
                             brace_depth -= 1;
@@ -800,8 +815,8 @@ impl<'a> TagScanner<'a> {
                 }
                 cursor += 1;
             }
-            if cursor > end {
-                break;
+            if !found_closing {
+                cursor = end;
             }
             let expr_end = cursor;
             let range = Range::new(
@@ -809,26 +824,29 @@ impl<'a> TagScanner<'a> {
                 self.line_index.position_at(expr_end),
             );
             let name = self.text[expr_start..expr_end].to_string();
-            let expression = if expr_end > expr_start + 3 {
-                let raw = &self.text[expr_start + 2..expr_end - 1];
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
+            let raw_slice = if found_closing {
+                &self.text[expr_start + 2..expr_end - 1]
             } else {
-                None
+                &self.text[expr_start + 2..expr_end]
             };
-            let expression_span = expression.as_ref().map(|trimmed| {
-                let raw = &self.text[expr_start + 2..expr_end - 1];
-                let rel_start = raw
-                    .find(trimmed)
+            let trimmed = raw_slice.trim();
+            let expression = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+            let expression_span = if let Some(expr_text) = expression.as_ref() {
+                let rel_start = raw_slice
+                    .find(expr_text)
                     .map(|offset| expr_start + 2 + offset)
                     .unwrap_or(expr_start + 2);
-                let rel_end = rel_start + trimmed.len();
-                (rel_start, rel_end)
-            });
+                let rel_end = rel_start + expr_text.len();
+                Some((rel_start, rel_end))
+            } else if found_closing {
+                Some((expr_start + 2, expr_end.saturating_sub(1)))
+            } else {
+                Some((expr_start + 2, expr_end))
+            };
             let locals_snapshot = state
                 .locals
                 .iter()
@@ -842,6 +860,7 @@ impl<'a> TagScanner<'a> {
                 range,
                 start_offset: expr_start,
                 end_offset: expr_end,
+                value_range: Some((expr_start + 2, expr_end)),
                 kind: ManifoldAttributeKind::TextExpression,
                 expression,
                 expression_span,

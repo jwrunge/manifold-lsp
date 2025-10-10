@@ -28,6 +28,10 @@
 			{
 				"command": "manifoldLanguageServer.toggleTypeHints",
 				"title": "Manifold: Toggle Type Annotations"
+			},
+			{
+				"command": "manifoldLanguageServer.toggleCompletionAutoTrigger",
+				"title": "Manifold: Toggle Auto Suggestions"
 			}
 		],
 		"configuration": {
@@ -85,6 +89,12 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Show inline type annotations for Manifold expressions exposed by the language server."
+				},
+				"manifoldLanguageServer.completions.autoTrigger": {
+					"scope": "window",
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically request Manifold-aware completions when typing '.', '${', or attribute quotes."
 				}
 			}
 		}

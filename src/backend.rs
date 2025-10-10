@@ -7,17 +7,16 @@ use tower_lsp::{
     async_trait,
     jsonrpc::Error,
     lsp_types::{
-        CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams,
-        CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-        DidOpenTextDocumentParams, ExecuteCommandOptions, ExecuteCommandParams,
-        GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-        HoverProviderCapability, InitializeParams, InitializeResult, InlayHint, InlayHintParams,
-        Location, MarkupContent, MarkupKind, MessageType, Position as LspPosition,
-        Range as LspRange, ReferenceParams, SemanticToken, SemanticTokenType, SemanticTokens,
-        SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-        SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-        ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-        TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+        CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse,
+        DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+        ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
+        Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams,
+        InitializeResult, InlayHint, InlayHintParams, Location, MarkupContent, MarkupKind,
+        MessageType, Position as LspPosition, Range as LspRange, ReferenceParams, SemanticToken,
+        SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+        SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+        SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentContentChangeEvent,
+        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
     },
     Client, LanguageServer,
 };
@@ -50,6 +49,7 @@ fn make_variable_completion(label: &str, detail: Option<String>) -> CompletionIt
         label: label.to_string(),
         kind: Some(CompletionItemKind::VARIABLE),
         detail,
+        sort_text: Some(format!("0{}", label)),
         ..Default::default()
     }
 }
@@ -260,10 +260,6 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
                 references_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
-                completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(false),
-                    ..Default::default()
-                }),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -296,19 +292,39 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        // Find attribute under cursor and token text
-        let maybe_attr = doc.parsed.manifold_attribute_at(&position);
-        let Some(attr) = maybe_attr else {
-            return Ok(None);
-        };
-        // Jump to state definition when clicking state name in data-mf-register
-        if attr.name.eq_ignore_ascii_case("data-mf-register") {
-            if let Some(expr) = &attr.expression {
+        if let Some(attr) = doc.parsed.manifold_attribute_at(&position) {
+            if attr.name.eq_ignore_ascii_case("data-mf-register") {
+                if let Some(expr) = &attr.expression {
+                    let html_path = uri.to_file_path().ok();
+                    let (state_idx, _unresolved) =
+                        crate::state::build_state_name_index(&doc.text, html_path.as_deref());
+                    let name = expr.trim().trim_matches('"').trim_matches('\'');
+                    if let Some(loc) = state_idx.get(name) {
+                        let range = LspRange::new(
+                            LspPosition::new(loc.line, loc.character),
+                            LspPosition::new(loc.line, loc.character + loc.length),
+                        );
+                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: loc.uri.clone(),
+                            range,
+                        })));
+                    }
+                }
+                return Ok(None);
+            }
+
+            let li = &doc.parsed.line_index;
+            if let Some(ident) = property_identifier_at(attr, li, &position) {
+                let state_name = attr
+                    .state_name
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
+
                 let html_path = uri.to_file_path().ok();
-                let (state_idx, _unresolved) =
-                    crate::state::build_state_name_index(&doc.text, html_path.as_deref());
-                let name = expr.trim().trim_matches('"').trim_matches('\'');
-                if let Some(loc) = state_idx.get(name) {
+                let (index, _unresolved) =
+                    crate::state::build_definition_index(&doc.text, html_path.as_deref());
+
+                if let Some(loc) = index.get(&(state_name.clone(), ident.clone())) {
                     let range = LspRange::new(
                         LspPosition::new(loc.line, loc.character),
                         LspPosition::new(loc.line, loc.character + loc.length),
@@ -319,34 +335,40 @@ impl LanguageServer for Backend {
                     })));
                 }
             }
-            return Ok(None);
         }
 
-        let li = &doc.parsed.line_index;
-        let Some(ident) = property_identifier_at(attr, li, &position) else {
-            return Ok(None);
-        };
+        drop(doc);
 
-        // Resolve state name
-        let state_name = attr
-            .state_name
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
+        let mut cross_document_results: Vec<Location> = Vec::new();
+        for entry in self.documents.iter() {
+            let html_uri = entry.key();
+            let document = entry.value();
+            let html_path = html_uri.to_file_path().ok();
+            let (index, _unresolved) =
+                crate::state::build_definition_index(&document.text, html_path.as_deref());
 
-        // Build definition index from current document
-        let html_path = uri.to_file_path().ok();
-        let (index, _unresolved) =
-            crate::state::build_definition_index(&doc.text, html_path.as_deref());
+            for ((state_name, prop_name), location) in index.iter() {
+                if location.uri != uri {
+                    continue;
+                }
 
-        if let Some(loc) = index.get(&(state_name.clone(), ident.clone())) {
-            let range = LspRange::new(
-                LspPosition::new(loc.line, loc.character),
-                LspPosition::new(loc.line, loc.character + loc.length),
-            );
-            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                uri: loc.uri.clone(),
-                range,
-            })));
+                let start = LspPosition::new(location.line, location.character);
+                let end = LspPosition::new(location.line, location.character + location.length);
+                if !position_within_range(&position, &start, &end) {
+                    continue;
+                }
+
+                for range in document.parsed.property_references(state_name, prop_name) {
+                    cross_document_results.push(Location {
+                        uri: html_uri.clone(),
+                        range,
+                    });
+                }
+            }
+        }
+
+        if !cross_document_results.is_empty() {
+            return Ok(Some(GotoDefinitionResponse::Array(cross_document_results)));
         }
 
         Ok(None)
@@ -367,15 +389,30 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        if let Some((span_start, span_end)) = attribute.expression_span {
-            let Some(offset) = doc.parsed.line_index.offset_at(&position) else {
-                return Ok(None);
-            };
+        let Some(offset) = doc.parsed.line_index.offset_at(&position) else {
+            return Ok(None);
+        };
 
-            if offset < span_start || offset > span_end {
-                return Ok(None);
+        let mut in_expression = false;
+        if let Some((span_start, span_end)) = attribute.expression_span {
+            if offset >= span_start && offset <= span_end {
+                in_expression = true;
             }
-        } else {
+        }
+
+        if !in_expression
+            && attribute
+                .value_range
+                .is_some_and(|(start, end)| offset >= start && offset <= end)
+        {
+            in_expression = true;
+        }
+
+        if !in_expression && offset >= attribute.start_offset && offset <= attribute.end_offset {
+            in_expression = true;
+        }
+
+        if !in_expression {
             return Ok(None);
         }
 
@@ -407,7 +444,20 @@ impl LanguageServer for Backend {
 
         items.sort_by(|a, b| a.label.cmp(&b.label));
 
-        Ok(Some(CompletionResponse::Array(items)))
+        if let Some(first) = items.first_mut() {
+            first.preselect = Some(true);
+            first.sort_text = Some(String::from("!0"));
+        }
+        for (idx, item) in items.iter_mut().enumerate().skip(1) {
+            item.sort_text = Some(format!("!{}{}", idx, item.label));
+        }
+
+        let list = tower_lsp::lsp_types::CompletionList {
+            is_incomplete: false,
+            items,
+        };
+
+        Ok(Some(CompletionResponse::List(list)))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>, Error> {
