@@ -188,24 +188,31 @@ pub fn build_definition_index(
             }
             // Simple text search to locate property occurrences
             for (state_name, prop) in defs {
-                if let Some(pos) = script
+                if let Some(method_pos) = script
                     .find(&format!("add(\"{}\"", prop))
                     .or_else(|| script.find(&format!(".add(\"{}\"", prop)))
                     .or_else(|| script.find(&format!("add('{}'", prop)))
                     .or_else(|| script.find(&format!(".add('{}'", prop)))
                 {
-                    let absolute = *start + pos;
-                    let p = html_li.position_at(absolute);
-                    if let Some(uri) = html_uri.clone() {
-                        index.insert(
-                            (state_name.clone(), prop.clone()),
-                            DefinitionLocation {
-                                uri,
-                                line: p.line,
-                                character: p.character,
-                                length: prop.len() as u32,
-                            },
-                        );
+                    // Calculate offset to the actual property name inside the quotes
+                    let quote_offset = script[method_pos..]
+                        .find('"')
+                        .or_else(|| script[method_pos..].find('\''));
+                    if let Some(quote_rel) = quote_offset {
+                        let prop_start_rel = method_pos + quote_rel + 1; // +1 to skip the opening quote
+                        let absolute = *start + prop_start_rel;
+                        let p = html_li.position_at(absolute);
+                        if let Some(uri) = html_uri.clone() {
+                            index.insert(
+                                (state_name.clone(), prop.clone()),
+                                DefinitionLocation {
+                                    uri,
+                                    line: p.line,
+                                    character: p.character,
+                                    length: prop.len() as u32,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -573,24 +580,31 @@ fn harvest_definitions_from_module(
         if let Some(definition) = analyze_module_item(item) {
             let state_name = definition.name.unwrap_or_else(|| "default".to_string());
             for (prop, _ty) in definition.properties.into_iter() {
-                // naive text search to get position
-                if let Some(pos) = content
+                // Find the property name position, not the method call position
+                if let Some(method_pos) = content
                     .find(&format!("add(\"{}\"", prop))
                     .or_else(|| content.find(&format!(".add(\"{}\"", prop)))
                     .or_else(|| content.find(&format!("add('{}'", prop)))
                     .or_else(|| content.find(&format!(".add('{}'", prop)))
                 {
-                    if let Ok(uri) = Url::from_file_path(file_path) {
-                        let p = li.position_at(pos);
-                        index.insert(
-                            (state_name.clone(), prop.clone()),
-                            DefinitionLocation {
-                                uri,
-                                line: p.line,
-                                character: p.character,
-                                length: prop.len() as u32,
-                            },
-                        );
+                    // Calculate offset to the actual property name inside the quotes
+                    let quote_offset = content[method_pos..]
+                        .find('"')
+                        .or_else(|| content[method_pos..].find('\''));
+                    if let Some(quote_rel) = quote_offset {
+                        let prop_start = method_pos + quote_rel + 1; // +1 to skip the opening quote
+                        if let Ok(uri) = Url::from_file_path(file_path) {
+                            let p = li.position_at(prop_start);
+                            index.insert(
+                                (state_name.clone(), prop.clone()),
+                                DefinitionLocation {
+                                    uri,
+                                    line: p.line,
+                                    character: p.character,
+                                    length: prop.len() as u32,
+                                },
+                            );
+                        }
                     }
                 }
             }
