@@ -277,7 +277,7 @@ pub fn build_definition_index(
     let html_li = crate::lineindex::LineIndex::new(html_text);
 
     let default_base = html_path
-    .and_then(|p| p.parent().map(Path::to_path_buf))
+        .and_then(|p| p.parent().map(Path::to_path_buf))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
@@ -538,7 +538,8 @@ mod tests {
 
     #[test]
     fn definition_index_includes_inline_state_properties() {
-    let (index, unresolved) = build_definition_index(HTML, Some(Path::new("/virtual/test.html")));
+        let (index, unresolved) =
+            build_definition_index(HTML, Some(Path::new("/virtual/test.html")));
         assert!(unresolved.is_empty());
 
         let key = ("default".to_string(), "count".to_string());
@@ -548,7 +549,8 @@ mod tests {
 
     #[test]
     fn state_name_index_tracks_custom_register_values() {
-    let (state_map, unresolved) = build_state_name_index(HTML, Some(Path::new("/virtual/test.html")));
+        let (state_map, unresolved) =
+            build_state_name_index(HTML, Some(Path::new("/virtual/test.html")));
         assert!(unresolved.is_empty());
         assert!(state_map.contains_key("secondary"));
     }
@@ -1057,10 +1059,12 @@ struct StateDefinition {
 fn analyze_module_item(item: &ModuleItem) -> Option<StateDefinition> {
     match item {
         ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl)))
-        | ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDecl(swc_ecma_ast::ExportDecl {
-            decl: swc_ecma_ast::Decl::Var(var_decl),
-            ..
-        })) => {
+        | ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDecl(
+            swc_ecma_ast::ExportDecl {
+                decl: swc_ecma_ast::Decl::Var(var_decl),
+                ..
+            },
+        )) => {
             for declarator in &var_decl.decls {
                 if let Some(init) = declarator.init.as_ref() {
                     if let Some(def) = analyze_expression(init.as_ref()) {
