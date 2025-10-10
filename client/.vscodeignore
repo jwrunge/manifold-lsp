@@ -1,0 +1,10 @@
+.github/**
+.gitignore
+.vscode/**
+**/*.ts
+**/*.tsx
+src/**
+node_modules/**
+**/*.map
+*.code-workspace
+README.local.md

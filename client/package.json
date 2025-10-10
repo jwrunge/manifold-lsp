@@ -1,9 +1,40 @@
 {
 	"name": "manifold-language-client",
 	"displayName": "Manifold Language Client",
-	"description": "VSCode client for Manifold Language Server",
+	"description": "Bring Manifold's reactive HTML authoring experience to VS Code with completions, diagnostics, and type insights.",
 	"license": "MIT",
-	"version": "0.0.1",
+	"version": "1.0.0",
+	"publisher": "manifold",
+	"author": {
+		"name": "Manifold Team"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/jwrunge/manifold-lsp"
+	},
+	"bugs": {
+		"url": "https://github.com/jwrunge/manifold-lsp/issues"
+	},
+	"homepage": "https://github.com/jwrunge/manifold-lsp",
+	"icon": "media/icon.png",
+	"galleryBanner": {
+		"color": "#121416",
+		"theme": "dark"
+	},
+	"categories": [
+		"Programming Languages",
+		"Linters"
+	],
+	"keywords": [
+		"manifold",
+		"html",
+		"lsp",
+		"language-server",
+		"templating"
+	],
+	"extensionKind": [
+		"workspace"
+	],
 	"engines": {
 		"vscode": "^1.85.0"
 	},
@@ -91,7 +122,9 @@
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
 		"compile": "tsc -p ./",
-		"watch": "tsc -watch -p ./"
+		"watch": "tsc -watch -p ./",
+		"package": "vsce package",
+		"publish": "vsce publish"
 	},
 	"dependencies": {
 		"vscode-languageclient": "9.0.1"

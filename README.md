@@ -12,6 +12,10 @@ A Language Server Protocol (LSP) implementation for the Manifold HTML framework,
 -   **Go-to Definition**: Navigate to variable and function definitions
 -   **Hover Information**: Contextual information for Manifold elements
 
+## JetBrains IDE support
+
+A Gradle-based IntelliJ Platform plugin lives under `jetbrains/`. Use `./gradlew runIde` from that directory to launch a sandbox IDE, or `./gradlew buildPlugin` to produce an installable ZIP. The plugin looks for the `manifold-language-server` binary in `jetbrains/bin/<platform>/`, the Cargo `target` folders, `MANIFOLD_LSP_BIN`, or your `PATH`.
+
 ## Manifold Syntax Support
 
 This language server supports the following Manifold features:

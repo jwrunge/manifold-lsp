@@ -1,0 +1,78 @@
+name: Build and Publish VS Code Extension
+
+on:
+    push:
+        tags:
+            - "v*"
+    release:
+        types: [published]
+    workflow_dispatch:
+        inputs:
+            publish:
+                description: "Publish to the VS Code Marketplace"
+                required: false
+                default: "false"
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        env:
+            CARGO_TERM_COLOR: always
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Set up Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo registry
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/registry
+                      ~/.cargo/git
+                      target
+                  key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v3
+              with:
+                  version: 8
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "20"
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install
+
+            - name: Run cargo clippy
+              run: cargo clippy --all-targets --all-features -- -D warnings
+
+            - name: Run cargo tests
+              run: cargo test --all
+
+            - name: Compile VS Code extension
+              run: pnpm compile
+
+            - name: Package VS Code extension
+              run: pnpm package
+
+            - name: Publish to VS Code Marketplace
+              if: ${{ github.event_name == 'release' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true') }}
+              run: |
+                  VSCE_TOKEN="${{ secrets.VSCE_TOKEN }}"
+                  if [ -z "$VSCE_TOKEN" ]; then
+                    echo "VSCE token not provided; skipping publish step."
+                    exit 0
+                  fi
+                  PACKAGE=$(ls client/*.vsix | tail -n 1)
+                  pnpm --dir client exec vsce publish --pat "$VSCE_TOKEN" --packagePath "$PACKAGE"
+
+            - name: Upload VSIX artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: manifold-language-client-vsix
+                  path: "client/*.vsix"
