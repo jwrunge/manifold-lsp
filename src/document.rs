@@ -8,7 +8,7 @@ use super::expression::{
     ValidationContext,
 };
 use super::lineindex::LineIndex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::state::{
     parse_states_from_document, resolve_identifier_type, LoopBinding, ManifoldStates,
@@ -130,6 +130,7 @@ impl ManifoldDocument {
             .unwrap_or_else(|| self.text.len());
 
         let mut hints = Vec::new();
+        let mut seen = HashSet::new();
 
         for attribute in &self.attributes {
             let Some((span_start, span_end)) = attribute.expression_span else {
@@ -141,8 +142,14 @@ impl ManifoldDocument {
             }
 
             if let Some(type_info) = self.expression_type(attribute) {
-                let label: InlayHintLabel = format!(": {}", type_info.describe()).into();
+                let label_text = format!(": {}", type_info.describe());
                 let position = self.line_index.position_at(span_end);
+
+                if !seen.insert((position.line, position.character, label_text.clone())) {
+                    continue;
+                }
+
+                let label: InlayHintLabel = label_text.into();
                 hints.push(InlayHint {
                     position,
                     label,
@@ -351,11 +358,7 @@ impl ManifoldDocument {
             return Some(TypeInfo::Boolean);
         }
 
-        if let Some(first_ident) = tokens
-            .iter()
-            .find(|token| token.kind == ExpressionTokenKind::Identifier)
-        {
-            let identifier = expr[first_ident.start..first_ident.end].to_string();
+        if let Some(identifier) = extract_identifier_chain(expr, &tokens) {
             if let Some(ty) = resolve_identifier_type(&identifier, state, &locals_map) {
                 return Some(ty);
             }
@@ -363,6 +366,39 @@ impl ManifoldDocument {
 
         None
     }
+}
+
+fn extract_identifier_chain(expr: &str, tokens: &[ExpressionToken]) -> Option<String> {
+    let first_index = tokens
+        .iter()
+        .position(|token| token.kind == ExpressionTokenKind::Identifier)?;
+
+    let first = &tokens[first_index];
+    let mut chain = expr[first.start..first.end].to_string();
+    let mut index = first_index + 1;
+
+    while index + 1 < tokens.len() {
+        let operator = &tokens[index];
+        if operator.kind != ExpressionTokenKind::Operator {
+            break;
+        }
+
+        let operator_text = expr[operator.start..operator.end].trim();
+        if operator_text != "." {
+            break;
+        }
+
+        let next = &tokens[index + 1];
+        if next.kind != ExpressionTokenKind::Identifier {
+            break;
+        }
+
+        chain.push('.');
+        chain.push_str(expr[next.start..next.end].trim());
+        index += 2;
+    }
+
+    Some(chain)
 }
 
 struct TagScanner<'a> {

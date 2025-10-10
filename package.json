@@ -24,6 +24,12 @@
 	],
 	"main": "./client/out/extension.js",
 	"contributes": {
+		"commands": [
+			{
+				"command": "manifoldLanguageServer.toggleTypeHints",
+				"title": "Manifold: Toggle Type Annotations"
+			}
+		],
 		"configuration": {
 			"type": "object",
 			"title": "Manifold Language Server",
@@ -47,6 +53,14 @@
 						{
 							"scheme": "file",
 							"language": "html"
+						},
+						{
+							"scheme": "file",
+							"language": "javascript"
+						},
+						{
+							"scheme": "file",
+							"language": "typescript"
 						}
 					],
 					"items": {
@@ -65,6 +79,12 @@
 							}
 						}
 					}
+				},
+				"manifoldLanguageServer.typeHints.enabled": {
+					"scope": "window",
+					"type": "boolean",
+					"default": true,
+					"description": "Show inline type annotations for Manifold expressions exposed by the language server."
 				}
 			}
 		}
