@@ -1,4 +1,6 @@
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use tower_lsp::lsp_types::{
+    Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, Position, Range,
+};
 
 use super::attribute::{ManifoldAttribute, ManifoldAttributeKind, ParsedAttribute};
 use super::expression::{
@@ -120,6 +122,102 @@ impl ManifoldDocument {
         results
     }
 
+    pub fn inlay_hints(&self, range: &Range) -> Vec<InlayHint> {
+        let range_start = self.line_index.offset_at(&range.start).unwrap_or(0);
+        let range_end = self
+            .line_index
+            .offset_at(&range.end)
+            .unwrap_or_else(|| self.text.len());
+
+        let mut hints = Vec::new();
+
+        for attribute in &self.attributes {
+            let Some((span_start, span_end)) = attribute.expression_span else {
+                continue;
+            };
+
+            if span_end < range_start || span_start > range_end {
+                continue;
+            }
+
+            if let Some(type_info) = self.expression_type(attribute) {
+                let label: InlayHintLabel = format!(": {}", type_info.describe()).into();
+                let position = self.line_index.position_at(span_end);
+                hints.push(InlayHint {
+                    position,
+                    label,
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: Some(true),
+                    padding_right: None,
+                    data: None,
+                });
+            }
+        }
+
+        hints
+    }
+
+    pub fn property_references(&self, state_name: &str, property: &str) -> Vec<Range> {
+        let mut ranges = Vec::new();
+
+        for attribute in &self.attributes {
+            let attr_state = attribute.state_name.as_deref().unwrap_or("default");
+            if attr_state != state_name {
+                continue;
+            }
+
+            let (Some(expr), Some((span_start, _span_end))) =
+                (attribute.expression.as_ref(), attribute.expression_span)
+            else {
+                continue;
+            };
+
+            let expr_bytes = expr.as_bytes();
+            let mut cursor = 0;
+            while cursor <= expr.len().saturating_sub(property.len()) {
+                let remaining = &expr[cursor..];
+                let Some(rel_index) = remaining.find(property) else {
+                    break;
+                };
+
+                let start = cursor + rel_index;
+                let end = start + property.len();
+
+                let prev_ok = if start == 0 {
+                    true
+                } else {
+                    let ch = expr_bytes[start - 1];
+                    !Self::is_identifier_char(ch)
+                };
+
+                let next_ok = if end >= expr.len() {
+                    true
+                } else {
+                    let ch = expr_bytes[end];
+                    !Self::is_identifier_char(ch)
+                };
+
+                if prev_ok && next_ok {
+                    let absolute_start = span_start + start;
+                    let absolute_end = span_start + end;
+                    ranges.push(Range::new(
+                        self.line_index.position_at(absolute_start),
+                        self.line_index.position_at(absolute_end),
+                    ));
+                }
+
+                cursor = start + 1;
+            }
+        }
+
+        ranges
+    }
+
+    fn is_identifier_char(ch: u8) -> bool {
+        ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'$'
+    }
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 
