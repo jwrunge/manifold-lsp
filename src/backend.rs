@@ -8,9 +8,8 @@ use tower_lsp::{
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
         ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
         Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams,
-        InitializeResult, InlayHint, InlayHintOptions, InlayHintParams,
-        InlayHintServerCapabilities, Location, MarkupContent, MarkupKind, MessageType,
-        Position as LspPosition, Range as LspRange, ReferenceParams, SemanticToken,
+        InitializeResult, InlayHint, InlayHintParams, Location, MarkupContent, MarkupKind,
+        MessageType, Position as LspPosition, Range as LspRange, ReferenceParams, SemanticToken,
         SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
         SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
         SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentContentChangeEvent,
@@ -261,9 +260,6 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
-                inlay_hint_provider: Some(tower_lsp::lsp_types::OneOf::Right(
-                    InlayHintServerCapabilities::Options(InlayHintOptions::default()),
-                )),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![String::from("custom.notification")],
                     ..Default::default()
