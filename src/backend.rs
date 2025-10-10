@@ -1,19 +1,23 @@
 use crate::expression::{parse_expression, ExpressionTokenKind};
 use dashmap::DashMap;
 use serde_json::Value;
+use std::collections::HashSet;
+
 use tower_lsp::{
     async_trait,
     jsonrpc::Error,
     lsp_types::{
-        DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
-        Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams,
-        InitializeResult, InlayHint, InlayHintParams, Location, MarkupContent, MarkupKind,
-        MessageType, Position as LspPosition, Range as LspRange, ReferenceParams, SemanticToken,
-        SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-        SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-        SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentContentChangeEvent,
-        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+        CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams,
+        CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+        DidOpenTextDocumentParams, ExecuteCommandOptions, ExecuteCommandParams,
+        GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+        HoverProviderCapability, InitializeParams, InitializeResult, InlayHint, InlayHintParams,
+        Location, MarkupContent, MarkupKind, MessageType, Position as LspPosition,
+        Range as LspRange, ReferenceParams, SemanticToken, SemanticTokenType, SemanticTokens,
+        SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+        SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+        ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+        TextDocumentSyncKind, Url, WorkDoneProgressOptions,
     },
     Client, LanguageServer,
 };
@@ -38,6 +42,15 @@ fn semantic_token_kind_index(kind: ExpressionTokenKind) -> u32 {
         ExpressionTokenKind::Number => 2,
         ExpressionTokenKind::String => 3,
         ExpressionTokenKind::Operator => 4,
+    }
+}
+
+fn make_variable_completion(label: &str, detail: Option<String>) -> CompletionItem {
+    CompletionItem {
+        label: label.to_string(),
+        kind: Some(CompletionItemKind::VARIABLE),
+        detail,
+        ..Default::default()
     }
 }
 
@@ -247,6 +260,10 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
                 references_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    ..Default::default()
+                }),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -335,19 +352,76 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> Result<Option<CompletionResponse>, Error> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+
+        let Some(doc) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+
+        let Some(attribute) = doc.parsed.manifold_attribute_at(&position) else {
+            return Ok(None);
+        };
+
+        if let Some((span_start, span_end)) = attribute.expression_span {
+            let Some(offset) = doc.parsed.line_index.offset_at(&position) else {
+                return Ok(None);
+            };
+
+            if offset < span_start || offset > span_end {
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
+        }
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut items: Vec<CompletionItem> = Vec::new();
+
+        let state_name = attribute.state_name.as_deref().unwrap_or("default");
+
+        if let Some(state) = doc.parsed.states.get(state_name) {
+            for (name, ty) in state.properties.iter() {
+                if seen.insert(name.clone()) {
+                    items.push(make_variable_completion(name, Some(ty.describe())));
+                }
+            }
+        }
+
+        for local in &attribute.locals {
+            if seen.insert(local.name.clone()) {
+                items.push(make_variable_completion(
+                    &local.name,
+                    Some(local.ty.describe()),
+                ));
+            }
+        }
+
+        if items.is_empty() {
+            return Ok(None);
+        }
+
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+
+        Ok(Some(CompletionResponse::Array(items)))
+    }
+
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>, Error> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
         let include_declaration = params.context.include_declaration;
 
-        let mut results: Vec<Location> = Vec::new();
-
         if let Some(doc) = self.documents.get(&uri) {
             if let Some(attribute) = doc.parsed.manifold_attribute_at(&position) {
                 if attribute.name.eq_ignore_ascii_case("data-mf-register") {
-                    return Ok(Some(results));
+                    return Ok(Some(Vec::new()));
                 }
 
+                let mut results: Vec<Location> = Vec::new();
                 let li = &doc.parsed.line_index;
                 if let Some(identifier) = property_identifier_at(attribute, li, &position) {
                     let state_name = attribute
@@ -377,10 +451,12 @@ impl LanguageServer for Backend {
                         }
                     }
                 }
-            }
 
-            return Ok(Some(results));
+                return Ok(Some(results));
+            }
         }
+
+        let mut results: Vec<Location> = Vec::new();
 
         for entry in self.documents.iter() {
             let html_uri = entry.key().clone();
