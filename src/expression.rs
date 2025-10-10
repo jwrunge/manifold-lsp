@@ -86,6 +86,7 @@ pub fn parse_expression_ast(expr: &str) -> Result<Box<Expr>, String> {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn validate_expression(
     expr: &str,
     allow_assignments: bool,
@@ -122,45 +123,10 @@ pub fn validate_expression_with_context(
     Ok(())
 }
 
-fn format_syntax_error(error_output: &str) -> String {
-    // Parse the error output to extract meaningful information
-    if error_output.contains("Unexpected token") {
-        if error_output.contains("Expected") {
-            // Try to extract what was expected
-            if let Some(expected_start) = error_output.find("Expected") {
-                if let Some(line_end) = error_output[expected_start..].find('\n') {
-                    let expected_msg = &error_output[expected_start..expected_start + line_end];
-                    return format!("Syntax error: {}. Manifold expressions support basic JavaScript syntax like variables, property access, and simple operations.", expected_msg.trim());
-                }
-            }
-        }
-        return "Syntax error: Unexpected token. Check your expression syntax - Manifold supports variables, property access, function calls, and basic operations.".into();
-    }
-
-    if error_output.contains("Expected expression") {
-        return "Syntax error: Expected an expression. Manifold expressions should be valid JavaScript expressions like variables, calculations, or function calls.".into();
-    }
-
-    if error_output.contains("Unterminated") {
-        if error_output.contains("string") {
-            return "Syntax error: Unterminated string literal. Make sure to close your quotes."
-                .into();
-        }
-        return "Syntax error: Unterminated expression. Check for missing closing brackets, parentheses, or quotes.".into();
-    }
-
-    if error_output.contains("Expected") && error_output.contains("but found") {
-        return "Syntax error: Unexpected character or token. Check your expression syntax.".into();
-    }
-
-    // If we can't parse the specific error, provide a helpful generic message
-    "Invalid expression syntax. Manifold expressions support literals, variables, property access, arithmetic/logical operations, ternary operators, function calls, and array/object literals. For complex logic, define functions in your Manifold state.".into()
-}
-
 fn analyze_syntax_errors(errors: &[swc_ecma_parser::error::Error], expr: &str) -> String {
     // Analyze common syntax errors and provide helpful feedback
     for error in errors {
-        let error_msg = format!("{:?}", error);
+        let error_msg = format!("{error:?}");
 
         if error_msg.contains("UnterminatedStr") {
             return "Syntax error: Unterminated string literal. Make sure to close your quotes."
@@ -201,7 +167,7 @@ fn analyze_syntax_errors(errors: &[swc_ecma_parser::error::Error], expr: &str) -
 }
 
 fn analyze_parse_error(error: &swc_ecma_parser::error::Error, expr: &str) -> String {
-    let error_msg = format!("{:?}", error);
+    let error_msg = format!("{error:?}");
 
     // Check for common patterns in the expression that might help identify the issue
     if expr.contains("'") && (expr.matches("'").count() % 2 != 0) {
@@ -249,7 +215,7 @@ pub fn tokenize_expression(expr: &str) -> Vec<ExpressionToken> {
     GLOBALS.set(&Default::default(), || {
         HANDLER.set(&handler, || {
             let fm = cm.new_source_file(FileName::Anon, trimmed.to_string());
-            let mut lexer = Lexer::new(
+            let lexer = Lexer::new(
                 Syntax::Typescript(TsConfig {
                     tsx: false,
                     dts: false,
@@ -261,7 +227,7 @@ pub fn tokenize_expression(expr: &str) -> Vec<ExpressionToken> {
             );
 
             let mut tokens = Vec::new();
-            while let Some(token_and_span) = lexer.next() {
+            for token_and_span in lexer {
                 if let Some(kind) = classify_token(&token_and_span.token) {
                     let start = token_and_span.span.lo.0.saturating_sub(1) as usize;
                     let end = token_and_span.span.hi.0.saturating_sub(1) as usize;
@@ -371,13 +337,11 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
             Ok(())
         }
         Array(array) => {
-            for elem in &array.elems {
-                if let Some(expr_or_spread) = elem {
-                    if expr_or_spread.spread.is_some() {
-                        return Err("The spread operator (...) is not supported in Manifold expressions. Define array composition logic in your Manifold state functions instead.".into());
-                    }
-                    check_expr(&expr_or_spread.expr, restrictions)?;
+            for expr_or_spread in array.elems.iter().flatten() {
+                if expr_or_spread.spread.is_some() {
+                    return Err("The spread operator (...) is not supported in Manifold expressions. Define array composition logic in your Manifold state functions instead.".into());
                 }
+                check_expr(&expr_or_spread.expr, restrictions)?;
             }
             Ok(())
         }
@@ -388,9 +352,8 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
             Ok(())
         }
         Call(call) => {
-            match &call.callee {
-                ast::Callee::Expr(expr) => check_expr(expr, restrictions)?,
-                ast::Callee::Super(_) | ast::Callee::Import(_) => {}
+            if let ast::Callee::Expr(expr) = &call.callee {
+                check_expr(expr, restrictions)?;
             }
             for arg in &call.args {
                 check_expr(&arg.expr, restrictions)?;
@@ -484,14 +447,11 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
             }
             Ok(())
         }
-        TaggedTpl(_) => {
-            return Err("Tagged template literals are not supported in Manifold expressions. Use string concatenation or define a function in your Manifold state instead.".into());
-        }
+        TaggedTpl(_) => Err("Tagged template literals are not supported in Manifold expressions. Use string concatenation or define a function in your Manifold state instead.".into()),
         Member(member) => {
             check_expr(&member.obj, restrictions)?;
-            match &member.prop {
-                ast::MemberProp::Computed(comp) => check_expr(&comp.expr, restrictions)?,
-                _ => {}
+            if let ast::MemberProp::Computed(comp) = &member.prop {
+                check_expr(&comp.expr, restrictions)?;
             }
             // Check for global access patterns
             if let Some(global_error) = check_for_global_access(member) {
@@ -514,30 +474,20 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
         TsInstantiation(ts) => check_expr(&ts.expr, restrictions),
         TsSatisfies(ts) => check_expr(&ts.expr, restrictions),
         // Check for unsupported JavaScript features
-        PrivateName(_) => {
-            return Err(
-                "Private properties (#property) are not supported in Manifold expressions.".into(),
-            );
-        }
-        Class(_) => {
-            return Err("Class expressions are not supported in Manifold expressions. Define classes in your Manifold state instead.".into());
-        }
-        MetaProp(meta) => {
-            return Err(format!(
-                "Meta properties ({}) are not supported in Manifold expressions.",
-                if meta.kind == ast::MetaPropKind::NewTarget {
-                    "new.target"
-                } else {
-                    "import.meta"
-                }
-            ));
-        }
-        SuperProp(_) => {
-            return Err("The 'super' keyword is not supported in Manifold expressions.".into());
-        }
-        This(_) => {
-            return Err("The 'this' keyword is not supported in Manifold expressions. Use variables from your Manifold state instead.".into());
-        }
+        PrivateName(_) => Err(
+            "Private properties (#property) are not supported in Manifold expressions.".into(),
+        ),
+        Class(_) => Err("Class expressions are not supported in Manifold expressions. Define classes in your Manifold state instead.".into()),
+        MetaProp(meta) => Err(format!(
+            "Meta properties ({}) are not supported in Manifold expressions.",
+            if meta.kind == ast::MetaPropKind::NewTarget {
+                "new.target"
+            } else {
+                "import.meta"
+            }
+        )),
+        SuperProp(_) => Err("The 'super' keyword is not supported in Manifold expressions.".into()),
+        This(_) => Err("The 'this' keyword is not supported in Manifold expressions. Use variables from your Manifold state instead.".into()),
         Ident(ident) => {
             // Check for global identifiers
             if let Some(global_error) = check_for_global_identifier(ident) {
@@ -558,42 +508,22 @@ fn check_stmt(stmt: &ast::Stmt, restrictions: &Restrictions) -> Result<(), Strin
             }
             Ok(())
         }
-        ast::Stmt::If(_) => {
-            return Err("If statements are not supported in Manifold expressions. Use ternary operators (condition ? value1 : value2) instead, or define logic in your Manifold state.".into());
-        }
+        ast::Stmt::If(_) => Err("If statements are not supported in Manifold expressions. Use ternary operators (condition ? value1 : value2) instead, or define logic in your Manifold state.".into()),
         ast::Stmt::Block(block) => {
             for stmt in &block.stmts {
                 check_stmt(stmt, restrictions)?;
             }
             Ok(())
         }
-        ast::Stmt::While(_) => {
-            return Err("While loops are not supported in Manifold expressions. Define loop logic in your Manifold state functions instead.".into());
-        }
-        ast::Stmt::DoWhile(_) => {
-            return Err("Do-while loops are not supported in Manifold expressions. Define loop logic in your Manifold state functions instead.".into());
-        }
-        ast::Stmt::For(_) => {
-            return Err("For loops are not supported in Manifold expressions. Use the :each directive for iteration, or define loop logic in your Manifold state functions.".into());
-        }
-        ast::Stmt::ForOf(_) => {
-            return Err("For-of loops are not supported in Manifold expressions. Use the :each directive for iteration, or define loop logic in your Manifold state functions.".into());
-        }
-        ast::Stmt::ForIn(_) => {
-            return Err("For-in loops are not supported in Manifold expressions. Use the :each directive for iteration, or define loop logic in your Manifold state functions.".into());
-        }
-        ast::Stmt::Switch(_) => {
-            return Err("Switch statements are not supported in Manifold expressions. Use ternary operators or define the logic in your Manifold state functions instead.".into());
-        }
-        ast::Stmt::Try(_) => {
-            return Err("Try-catch statements are not supported in Manifold expressions. Handle errors in your Manifold state functions instead.".into());
-        }
-        ast::Stmt::Throw(_) => {
-            return Err("Throw statements are not supported in Manifold expressions. Handle errors in your Manifold state functions instead.".into());
-        }
-        ast::Stmt::Decl(_) => {
-            return Err("Declarations are not supported in Manifold expressions. Define functions and variables in your Manifold state instead.".into());
-        }
+        ast::Stmt::While(_) => Err("While loops are not supported in Manifold expressions. Define loop logic in your Manifold state functions instead.".into()),
+        ast::Stmt::DoWhile(_) => Err("Do-while loops are not supported in Manifold expressions. Define loop logic in your Manifold state functions instead.".into()),
+        ast::Stmt::For(_) => Err("For loops are not supported in Manifold expressions. Use the :each directive for iteration, or define loop logic in your Manifold state functions.".into()),
+        ast::Stmt::ForOf(_) => Err("For-of loops are not supported in Manifold expressions. Use the :each directive for iteration, or define loop logic in your Manifold state functions.".into()),
+        ast::Stmt::ForIn(_) => Err("For-in loops are not supported in Manifold expressions. Use the :each directive for iteration, or define loop logic in your Manifold state functions.".into()),
+        ast::Stmt::Switch(_) => Err("Switch statements are not supported in Manifold expressions. Use ternary operators or define the logic in your Manifold state functions instead.".into()),
+        ast::Stmt::Try(_) => Err("Try-catch statements are not supported in Manifold expressions. Handle errors in your Manifold state functions instead.".into()),
+        ast::Stmt::Throw(_) => Err("Throw statements are not supported in Manifold expressions. Handle errors in your Manifold state functions instead.".into()),
+        ast::Stmt::Decl(_) => Err("Declarations are not supported in Manifold expressions. Define functions and variables in your Manifold state instead.".into()),
         _ => Ok(()),
     }
 }
@@ -653,9 +583,7 @@ fn check_prop_or_spread(
             ast::Prop::Assign(assign) => check_expr(&assign.value, restrictions),
             ast::Prop::Shorthand(_) => Ok(()),
         },
-        ast::PropOrSpread::Spread(_) => {
-            return Err("The spread operator (...) is not supported in Manifold expressions. Define object composition logic in your Manifold state functions instead.".into());
-        }
+        ast::PropOrSpread::Spread(_) => Err("The spread operator (...) is not supported in Manifold expressions. Define object composition logic in your Manifold state functions instead.".into()),
     }
 }
 
@@ -679,9 +607,8 @@ fn visit_expr_for_identifiers(expr: &Expr, context: &ValidationContext) -> Resul
             Ok(())
         }
         Call(call) => {
-            match &call.callee {
-                ast::Callee::Expr(expr) => visit_expr_for_identifiers(expr, context)?,
-                _ => {}
+            if let ast::Callee::Expr(expr) = &call.callee {
+                visit_expr_for_identifiers(expr, context)?;
             }
             for arg in &call.args {
                 visit_expr_for_identifiers(&arg.expr, context)?;
@@ -714,10 +641,8 @@ fn visit_expr_for_identifiers(expr: &Expr, context: &ValidationContext) -> Resul
             Ok(())
         }
         Array(array) => {
-            for elem in &array.elems {
-                if let Some(expr_or_spread) = elem {
-                    visit_expr_for_identifiers(&expr_or_spread.expr, context)?;
-                }
+            for expr_or_spread in array.elems.iter().flatten() {
+                visit_expr_for_identifiers(&expr_or_spread.expr, context)?;
             }
             Ok(())
         }
@@ -863,12 +788,10 @@ fn validate_identifier_reference(
     // If we get here, the variable is not found
     Err(match context.state_name {
         Some(state_name) => format!(
-            "Unknown variable '{}'. Variables must be defined in your Manifold state ('{}') or provided from the current scope (e.g., :each locals).",
-            name, state_name
+            "Unknown variable '{name}'. Variables must be defined in your Manifold state ('{state_name}') or provided from the current scope (e.g., :each locals).",
         ),
         None => format!(
-            "Unknown variable '{}'. Variables must be defined in your Manifold state or provided from the current scope (e.g., :each locals).",
-            name
+            "Unknown variable '{name}'. Variables must be defined in your Manifold state or provided from the current scope (e.g., :each locals).",
         ),
     })
 }
@@ -977,7 +900,7 @@ fn check_for_global_identifier(ident: &ast::Ident) -> Option<String> {
         "setInterval" | "clearTimeout" | "clearInterval" | "alert" | 
         "confirm" | "prompt" | "Array" | "Object" | "String" | "Number" | 
         "Boolean" | "RegExp" | "Error" | "Promise" => {
-            Some(format!("Global '{}' is not available in Manifold expressions. Define this functionality in your Manifold state functions instead.", name))
+            Some(format!("Global '{name}' is not available in Manifold expressions. Define this functionality in your Manifold state functions instead."))
         }
         _ => None
     }

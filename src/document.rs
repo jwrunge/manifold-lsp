@@ -32,6 +32,12 @@ pub struct DocumentSemanticToken {
     pub kind: ExpressionTokenKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionCandidate {
+    pub label: String,
+    pub detail: Option<String>,
+}
+
 impl ManifoldDocument {
     pub fn parse(text: &str) -> Self {
         let line_index = LineIndex::new(text);
@@ -74,6 +80,47 @@ impl ManifoldDocument {
         self.attributes
             .iter()
             .find(|attr| offset >= attr.start_offset && offset <= attr.end_offset)
+    }
+
+    pub fn completion_candidates(&self, position: &Position) -> Option<Vec<CompletionCandidate>> {
+        let attribute = self.manifold_attribute_at(position)?;
+        let offset = self.line_index.offset_at(position)?;
+
+        if !attribute_contains_offset(attribute, offset) {
+            return None;
+        }
+
+        let mut seen = HashSet::new();
+        let mut candidates: Vec<CompletionCandidate> = Vec::new();
+
+        let state_name = attribute.state_name.as_deref().unwrap_or("default");
+
+        if let Some(state) = self.states.get(state_name) {
+            for (name, ty) in state.properties.iter() {
+                if seen.insert(name.clone()) {
+                    candidates.push(CompletionCandidate {
+                        label: name.clone(),
+                        detail: Some(ty.describe()),
+                    });
+                }
+            }
+        }
+
+        for local in &attribute.locals {
+            if seen.insert(local.name.clone()) {
+                candidates.push(CompletionCandidate {
+                    label: local.name.clone(),
+                    detail: Some(local.ty.describe()),
+                });
+            }
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        candidates.sort_by(|a, b| a.label.cmp(&b.label));
+        Some(candidates)
     }
 
     pub fn semantic_tokens(&self) -> Vec<DocumentSemanticToken> {
@@ -127,7 +174,7 @@ impl ManifoldDocument {
         let range_end = self
             .line_index
             .offset_at(&range.end)
-            .unwrap_or_else(|| self.text.len());
+            .unwrap_or(self.text.len());
 
         let mut hints = Vec::new();
         let mut seen = HashSet::new();
@@ -246,8 +293,8 @@ impl ManifoldDocument {
             };
 
             // Skip variable reference validation for :each expressions since they have special syntax
-            let skip_variable_validation = attribute.name.to_ascii_lowercase() == ":each"
-                || attribute.name.to_ascii_lowercase() == "data-mf-each";
+            let skip_variable_validation = attribute.name.eq_ignore_ascii_case(":each")
+                || attribute.name.eq_ignore_ascii_case("data-mf-each");
 
             if let Err(message) = validate_expression_with_context(
                 expr,
@@ -365,6 +412,128 @@ impl ManifoldDocument {
         }
 
         None
+    }
+}
+
+fn attribute_contains_offset(attribute: &ManifoldAttribute, offset: usize) -> bool {
+    if let Some((start, end)) = attribute.expression_span {
+        if offset >= start && offset <= end {
+            return true;
+        }
+    }
+
+    if let Some((start, end)) = attribute.value_range {
+        if offset >= start && offset <= end {
+            return true;
+        }
+    }
+
+    offset >= attribute.start_offset && offset <= attribute.end_offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower_lsp::lsp_types::{Position, Range};
+
+    const SAMPLE_HTML: &str = r#"
+        <div data-mf-register>
+            <button :onclick="count++">Increment</button>
+            <button :if="count > 5">${count}</button>
+            <ul>
+                <li :each="items as item, index">
+                    Item: ${item} @ ${index} / ${count}
+                </li>
+            </ul>
+        </div>
+        <script type="module">
+            const state = Manifold.create()
+                .add("count", 0)
+                .add("items", ["A", "B"])
+                .add("status", "idle")
+                .build();
+        </script>
+    "#;
+
+    fn position_in(doc: &ManifoldDocument, needle: &str, relative: usize) -> Position {
+        let start = doc
+            .text
+            .find(needle)
+            .unwrap_or_else(|| panic!("needle '{needle}' not found"));
+        doc.line_index.position_at(start + relative)
+    }
+
+    #[test]
+    fn completions_include_state_properties_inside_attribute() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let position = position_in(&document, "count++", 1);
+
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected attribute completions");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"count".to_string()));
+        assert!(labels.contains(&"items".to_string()));
+        assert!(labels.contains(&"status".to_string()));
+    }
+
+    #[test]
+    fn completions_include_loop_locals_in_text_expression() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let position = position_in(&document, "${item}", 3);
+
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected text expression completions");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"item".to_string()));
+        assert!(labels.contains(&"index".to_string()));
+        assert!(labels.contains(&"count".to_string()));
+    }
+
+    #[test]
+    fn attribute_completion_available_when_value_is_empty() {
+        let html = r#"
+            <div data-mf-register>
+                <button :if=""></button>
+            </div>
+            <script type="module">
+                const state = Manifold.create().add("count", 0).build();
+            </script>
+        "#;
+        let document = ManifoldDocument::parse(html);
+        let position = position_in(&document, ":if=\"\"", 5);
+
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected completions for empty attribute value");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"count".to_string()));
+    }
+
+    #[test]
+    fn property_references_include_loop_and_text_usages() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let references = document.property_references("default", "count");
+        assert!(references.len() >= 3);
+    }
+
+    #[test]
+    fn inlay_hints_present_for_registered_attributes() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let end = document.line_index.position_at(document.text.len());
+        let hints = document.inlay_hints(&Range::new(Position::new(0, 0), end));
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn manifold_attribute_lookup_is_inclusive() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let end_position = position_in(&document, "count > 5\"", 0);
+        let attribute = document
+            .manifold_attribute_at(&end_position)
+            .expect("should detect attribute at closing quote");
+        assert_eq!(attribute.name, ":if".to_string());
     }
 }
 

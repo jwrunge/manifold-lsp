@@ -17,7 +17,7 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let (service, socket) = LspService::new(|client| Backend::new(client));
+    let (service, socket) = LspService::new(Backend::new);
 
     if let Ok(addr) = std::env::var("MANIFOLD_LSP_TCP") {
         let listener = TcpListener::bind(addr).await.unwrap();
@@ -360,8 +360,7 @@ mod tests {
         // Should have no errors for valid event handler assignments
         assert!(
             diagnostics.is_empty(),
-            "Event handlers should allow assignments but got errors: {:?}",
-            diagnostics
+            "Event handlers should allow assignments but got errors: {diagnostics:?}"
         );
     }
 
@@ -453,8 +452,7 @@ mod tests {
         // Should have no errors for valid variable references
         assert!(
             diagnostics.is_empty(),
-            "Known variables should not cause errors: {:?}",
-            diagnostics
+            "Known variables should not cause errors: {diagnostics:?}"
         );
     }
 
@@ -489,8 +487,7 @@ mod tests {
 
         assert!(
             has_string_error || has_bracket_error,
-            "Should provide specific syntax error messages: {:?}",
-            messages
+            "Should provide specific syntax error messages: {messages:?}"
         );
     }
 
@@ -523,8 +520,7 @@ mod tests {
         assert_eq!(
             diagnostics.len(),
             2,
-            "Should detect unknown variables with proper scoping: {:?}",
-            diagnostics
+            "Should detect unknown variables with proper scoping: {diagnostics:?}"
         );
 
         let messages: Vec<String> = diagnostics.iter().map(|d| d.message.clone()).collect();

@@ -1,7 +1,6 @@
 use crate::expression::{parse_expression, ExpressionTokenKind};
 use dashmap::DashMap;
 use serde_json::Value;
-use std::collections::HashSet;
 
 use tower_lsp::{
     async_trait,
@@ -49,7 +48,7 @@ fn make_variable_completion(label: &str, detail: Option<String>) -> CompletionIt
         label: label.to_string(),
         kind: Some(CompletionItemKind::VARIABLE),
         detail,
-        sort_text: Some(format!("0{}", label)),
+        sort_text: Some(format!("0{label}")),
         ..Default::default()
     }
 }
@@ -265,7 +264,7 @@ impl LanguageServer for Backend {
                         SemanticTokensOptions {
                             work_done_progress_options: WorkDoneProgressOptions::default(),
                             legend: SemanticTokensLegend {
-                                token_types: SEMANTIC_TOKEN_TYPES.iter().cloned().collect(),
+                                token_types: SEMANTIC_TOKEN_TYPES.to_vec(),
                                 token_modifiers: Vec::new(),
                             },
                             range: None,
@@ -275,11 +274,10 @@ impl LanguageServer for Backend {
                 ),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![String::from("custom.notification")],
-                    ..Default::default()
+                    work_done_progress_options: Default::default(),
                 }),
                 ..ServerCapabilities::default()
             },
-            ..Default::default()
         })
     }
     async fn goto_definition(
@@ -385,71 +383,21 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let Some(attribute) = doc.parsed.manifold_attribute_at(&position) else {
+        let Some(candidates) = doc.parsed.completion_candidates(&position) else {
             return Ok(None);
         };
 
-        let Some(offset) = doc.parsed.line_index.offset_at(&position) else {
-            return Ok(None);
-        };
-
-        let mut in_expression = false;
-        if let Some((span_start, span_end)) = attribute.expression_span {
-            if offset >= span_start && offset <= span_end {
-                in_expression = true;
-            }
-        }
-
-        if !in_expression
-            && attribute
-                .value_range
-                .is_some_and(|(start, end)| offset >= start && offset <= end)
-        {
-            in_expression = true;
-        }
-
-        if !in_expression && offset >= attribute.start_offset && offset <= attribute.end_offset {
-            in_expression = true;
-        }
-
-        if !in_expression {
-            return Ok(None);
-        }
-
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut items: Vec<CompletionItem> = Vec::new();
-
-        let state_name = attribute.state_name.as_deref().unwrap_or("default");
-
-        if let Some(state) = doc.parsed.states.get(state_name) {
-            for (name, ty) in state.properties.iter() {
-                if seen.insert(name.clone()) {
-                    items.push(make_variable_completion(name, Some(ty.describe())));
-                }
-            }
-        }
-
-        for local in &attribute.locals {
-            if seen.insert(local.name.clone()) {
-                items.push(make_variable_completion(
-                    &local.name,
-                    Some(local.ty.describe()),
-                ));
-            }
-        }
-
-        if items.is_empty() {
-            return Ok(None);
-        }
-
-        items.sort_by(|a, b| a.label.cmp(&b.label));
+        let mut items: Vec<CompletionItem> = candidates
+            .iter()
+            .map(|candidate| make_variable_completion(&candidate.label, candidate.detail.clone()))
+            .collect();
 
         if let Some(first) = items.first_mut() {
             first.preselect = Some(true);
             first.sort_text = Some(String::from("!0"));
         }
         for (idx, item) in items.iter_mut().enumerate().skip(1) {
-            item.sort_text = Some(format!("!{}{}", idx, item.label));
+            item.sort_text = Some(format!("!{idx}{}", item.label));
         }
 
         let list = tower_lsp::lsp_types::CompletionList {
@@ -612,7 +560,7 @@ impl LanguageServer for Backend {
 
         if let Some(document) = self.documents.get(&uri) {
             if let Some(attribute) = document.parsed.manifold_attribute_at(&position).cloned() {
-                let range = attribute.range.clone();
+                let range = attribute.range;
                 let intro_message = match attribute.kind {
                 ManifoldAttributeKind::Attribute => format!(
                     "`{}` is treated as a Manifold-specific attribute because its element is registered with `data-mf-register`.",
@@ -712,7 +660,7 @@ impl LanguageServer for Backend {
             self.client
                 .log_message(
                     MessageType::INFO,
-                    format!("Command executited successfully with params: {:?}", params),
+                    format!("Command executed successfully with params: {params:?}"),
                 )
                 .await;
 

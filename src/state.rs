@@ -46,7 +46,7 @@ impl TypeInfo {
                         .map(|(name, ty)| format!("{}: {}", name, ty.describe()))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    format!("{{ {} }}", fields)
+                    format!("{{ {fields} }}")
                 }
             }
         }
@@ -205,12 +205,6 @@ impl FileCache {
     }
 }
 
-pub fn parse_states_from_scripts(text: &str) -> ManifoldStates {
-    // Backward-compatible entry that ignores unresolved includes.
-    let (states, _unresolved) = parse_states_from_document(text, None);
-    states
-}
-
 pub fn parse_states_from_document(
     text: &str,
     base_dir: Option<&Path>,
@@ -283,8 +277,7 @@ pub fn build_definition_index(
     let html_li = crate::lineindex::LineIndex::new(html_text);
 
     let default_base = html_path
-        .map(|p| p.parent().map(|pp| pp.to_path_buf()))
-        .flatten()
+    .and_then(|p| p.parent().map(Path::to_path_buf))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
@@ -518,12 +511,55 @@ pub fn build_state_name_index(
     (index, unresolved)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HTML: &str = r#"
+        <div data-mf-register>
+            <button :onclick="count++">Increment</button>
+            <button :onclick="items.push(item)">Add</button>
+        </div>
+        <div data-mf-register="secondary">
+            <p>${message}</p>
+        </div>
+        <script type="module">
+            const state = Manifold.create()
+                .add("count", 0)
+                .add("items", [])
+                .add("message", "hi")
+                .build();
+
+            const secondary = Manifold.create("secondary")
+                .add("message", "from secondary")
+                .build();
+        </script>
+    "#;
+
+    #[test]
+    fn definition_index_includes_inline_state_properties() {
+    let (index, unresolved) = build_definition_index(HTML, Some(Path::new("/virtual/test.html")));
+        assert!(unresolved.is_empty());
+
+        let key = ("default".to_string(), "count".to_string());
+        let definition = index.get(&key).expect("count definition present");
+        assert!(definition.length >= 5);
+    }
+
+    #[test]
+    fn state_name_index_tracks_custom_register_values() {
+    let (state_map, unresolved) = build_state_name_index(HTML, Some(Path::new("/virtual/test.html")));
+        assert!(unresolved.is_empty());
+        assert!(state_map.contains_key("secondary"));
+    }
+}
+
 fn find_create_call(content: &str, name: &str) -> Option<usize> {
     [
-        format!("create(\"{}\")", name),
-        format!(".create(\"{}\")", name),
-        format!("create('{}')", name),
-        format!(".create('{}')", name),
+        format!("create(\"{name}\")"),
+        format!(".create(\"{name}\")"),
+        format!("create('{name}')"),
+        format!(".create('{name}')"),
     ]
     .into_iter()
     .find_map(|p| content.find(&p))
@@ -637,7 +673,7 @@ fn extract_script_blocks_srcs_with_starts(text: &str) -> (Vec<String>, Vec<Strin
 fn find_attribute_value(tag_open: &str, attr: &str) -> Option<String> {
     // naive attribute extractor for src="..." or src='...'
     let lower = tag_open.to_ascii_lowercase();
-    let needle = format!("{}=", attr);
+    let needle = format!("{attr}=");
     let mut i = 0usize;
     while let Some(pos) = lower[i..].find(&needle) {
         let idx = i + pos + needle.len();
@@ -1020,41 +1056,24 @@ struct StateDefinition {
 
 fn analyze_module_item(item: &ModuleItem) -> Option<StateDefinition> {
     match item {
-        ModuleItem::Stmt(stmt) => match stmt {
-            swc_ecma_ast::Stmt::Decl(decl) => match decl {
-                swc_ecma_ast::Decl::Var(var_decl) => {
-                    for declarator in &var_decl.decls {
-                        if let Some(init) = declarator.init.as_ref() {
-                            if let Some(def) = analyze_expression(init.as_ref()) {
-                                return Some(def);
-                            }
-                        }
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl)))
+        | ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDecl(swc_ecma_ast::ExportDecl {
+            decl: swc_ecma_ast::Decl::Var(var_decl),
+            ..
+        })) => {
+            for declarator in &var_decl.decls {
+                if let Some(init) = declarator.init.as_ref() {
+                    if let Some(def) = analyze_expression(init.as_ref()) {
+                        return Some(def);
                     }
-                    None
                 }
-                _ => None,
-            },
-            _ => None,
-        },
-        ModuleItem::ModuleDecl(module_decl) => match module_decl {
-            swc_ecma_ast::ModuleDecl::ExportDecl(export_decl) => match &export_decl.decl {
-                swc_ecma_ast::Decl::Var(var_decl) => {
-                    for declarator in &var_decl.decls {
-                        if let Some(init) = declarator.init.as_ref() {
-                            if let Some(def) = analyze_expression(init.as_ref()) {
-                                return Some(def);
-                            }
-                        }
-                    }
-                    None
-                }
-                _ => None,
-            },
-            swc_ecma_ast::ModuleDecl::ExportDefaultExpr(default_expr) => {
-                analyze_expression(&default_expr.expr)
             }
-            _ => None,
-        },
+            None
+        }
+        ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDefaultExpr(default_expr)) => {
+            analyze_expression(&default_expr.expr)
+        }
+        ModuleItem::Stmt(_) | ModuleItem::ModuleDecl(_) => None,
     }
 }
 
@@ -1064,7 +1083,7 @@ fn analyze_expression(expr: &Expr) -> Option<StateDefinition> {
             if let Expr::Member(member) = &**callee {
                 if property_name(member)? == "build" {
                     let mut definition = StateDefinition::default();
-                    if let Some(arg) = call.args.get(0) {
+                    if let Some(arg) = call.args.first() {
                         if let Some((name, span)) = string_from_expr(&arg.expr) {
                             definition.name = Some(name);
                             definition.name_span = span;
@@ -1089,7 +1108,7 @@ fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
                         "add" => {
                             if let Some(ExprOrSpread {
                                 expr: prop_expr, ..
-                            }) = call.args.get(0)
+                            }) = call.args.first()
                             {
                                 if let Some((prop_name, span)) = string_from_expr(prop_expr) {
                                     let ty = call
@@ -1110,7 +1129,7 @@ fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
                             if definition.name.is_none() {
                                 if let Some(ExprOrSpread {
                                     expr: name_expr, ..
-                                }) = call.args.get(0)
+                                }) = call.args.first()
                                 {
                                     if let Some((name, span)) = string_from_expr(name_expr) {
                                         definition.name = Some(name);
@@ -1130,13 +1149,7 @@ fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
             }
         }
         Expr::Member(member) => collect_chain(&member.obj, definition),
-        Expr::Ident(ident) => {
-            if ident.sym == *"Manifold" {
-                Some(())
-            } else {
-                Some(())
-            }
-        }
+        Expr::Ident(_) => Some(()),
         _ => Some(()),
     }
 }
@@ -1177,23 +1190,21 @@ fn infer_type_from_expr(expr: &Expr) -> Option<TypeInfo> {
 
 fn infer_array_type(array: &ArrayLit) -> TypeInfo {
     let mut element: Option<TypeInfo> = None;
-    for elem in &array.elems {
-        if let Some(expr_or_spread) = elem {
-            if expr_or_spread.spread.is_some() {
-                return TypeInfo::Any;
-            }
-            if let Some(value) = infer_type_from_expr(&expr_or_spread.expr) {
-                element = match element {
-                    None => Some(value),
-                    Some(existing) => {
-                        if existing == value {
-                            Some(existing)
-                        } else {
-                            return TypeInfo::Any;
-                        }
+    for expr_or_spread in array.elems.iter().flatten() {
+        if expr_or_spread.spread.is_some() {
+            return TypeInfo::Any;
+        }
+        if let Some(value) = infer_type_from_expr(&expr_or_spread.expr) {
+            element = match element {
+                None => Some(value),
+                Some(existing) => {
+                    if existing == value {
+                        Some(existing)
+                    } else {
+                        return TypeInfo::Any;
                     }
-                };
-            }
+                }
+            };
         }
     }
     TypeInfo::Array(Box::new(element.unwrap_or(TypeInfo::Any)))
