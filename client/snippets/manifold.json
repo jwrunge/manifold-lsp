@@ -1,0 +1,37 @@
+{
+	"Manifold if": {
+		"prefix": [":if", "mf-if"],
+		"body": [":if=\"${1:condition}\""],
+		"description": "Render the element only when the condition is truthy."
+	},
+	"Manifold else-if": {
+		"prefix": [":else-if", "mf-elif"],
+		"body": [":else-if=\"${1:condition}\""],
+		"description": "Manifold `:else-if` directive."
+	},
+	"Manifold else": {
+		"prefix": [":else", "mf-else"],
+		"body": [":else"],
+		"description": "Manifold `:else` directive with no condition."
+	},
+	"Manifold each": {
+		"prefix": [":each", "mf-each"],
+		"body": [":each=\"${1:items} as ${2:item}, ${3:index}\""],
+		"description": "Iterate over a collection with optional index binding."
+	},
+	"Manifold on click": {
+		"prefix": [":onclick", "mf-onclick"],
+		"body": [":onclick=\"${1:handleClick}(${2:event})\""],
+		"description": "Event handler directive for click events."
+	},
+	"Manifold class": {
+		"prefix": [":class", "mf-class"],
+		"body": [":class=\"{ ${1:className}: ${2:condition} }\""],
+		"description": "Dynamic class binding in Manifold."
+	},
+	"Manifold text": {
+		"prefix": [":text", "mf-text"],
+		"body": [":text=\"${1:expression}\""],
+		"description": "Bind text content to a Manifold expression."
+	}
+}

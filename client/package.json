@@ -12,6 +12,22 @@
 		"onStartupFinished"
 	],
 	"contributes": {
+		"commands": [
+			{
+				"command": "manifoldLanguageServer.restart",
+				"title": "Manifold: Restart Language Server"
+			},
+			{
+				"command": "manifoldLanguageServer.showStateTree",
+				"title": "Manifold: Show Parsed State Tree"
+			}
+		],
+		"snippets": [
+			{
+				"language": "html",
+				"path": "./snippets/manifold.json"
+			}
+		],
 		"configuration": {
 			"type": "object",
 			"title": "Manifold Language Server",
@@ -34,6 +50,18 @@
 					"default": [
 						{
 							"scheme": "file",
+							"language": "html"
+						},
+						{
+							"scheme": "file",
+							"language": "manifold"
+						},
+						{
+							"scheme": "file",
+							"language": "manifold-html"
+						},
+						{
+							"scheme": "untitled",
 							"language": "html"
 						}
 					],

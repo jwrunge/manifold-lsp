@@ -10,6 +10,9 @@ import {
 	window,
 	TextDocumentChangeEvent,
 	DocumentFilter,
+	commands,
+	StatusBarAlignment,
+	StatusBarItem,
 } from "vscode";
 
 import {
@@ -18,22 +21,28 @@ import {
 	LanguageClient,
 	LanguageClientOptions,
 	ServerOptions,
+	ExecuteCommandRequest,
+	State,
 } from "vscode-languageclient/node";
 
 let client: LanguageClient;
+let statusItem: StatusBarItem | undefined;
 
-export async function activate() {
+export async function activate(ctx: ExtensionContext) {
 	const traceOutputChannel = window.createOutputChannel(
 		"Manifold Language Server trace"
 	);
 	const command = process.env.SERVER_PATH || "nrs-language-server";
+	const configuration = workspace.getConfiguration("manifoldLanguageServer");
+	const traceSetting = configuration.get<string>("trace.server", "off");
+	const rustLogLevel = mapTraceToRustLog(traceSetting);
 	const run: Executable = {
 		command,
 		options: {
 			env: {
 				...process.env,
 				// eslint-disable-next-line @typescript-eslint/naming-convention
-				RUST_LOG: "debug",
+				RUST_LOG: rustLogLevel,
 			},
 		},
 	};
@@ -43,7 +52,7 @@ export async function activate() {
 	};
 
 	const selectors = getDocumentSelectors();
-	let clientOptions: LanguageClientOptions = {
+	const clientOptions: LanguageClientOptions = {
 		documentSelector:
 			selectors as LanguageClientOptions["documentSelector"],
 		traceOutputChannel,
@@ -55,7 +64,98 @@ export async function activate() {
 		serverOptions,
 		clientOptions
 	);
-	client.start();
+
+	statusItem = window.createStatusBarItem(StatusBarAlignment.Left, 1);
+	statusItem.name = "Manifold Language Server";
+	statusItem.text = "$(sync~spin) Manifold LSP";
+	statusItem.tooltip = "Manifold language server status";
+	statusItem.command = "manifoldLanguageServer.showStateTree";
+	statusItem.show();
+
+	const restartCommand = commands.registerCommand(
+		"manifoldLanguageServer.restart",
+		async () => {
+			if (!client) {
+				return;
+			}
+			statusItem!.text = "$(sync~spin) Manifold LSP";
+			await client.stop();
+			await client.start();
+		}
+	);
+
+	const showStateTreeCommand = commands.registerCommand(
+		"manifoldLanguageServer.showStateTree",
+		async () => {
+			if (!client) {
+				return;
+			}
+			const editor = window.activeTextEditor;
+			if (!editor) {
+				window.showInformationMessage(
+					"Open a Manifold template to inspect its state tree."
+				);
+				return;
+			}
+
+			try {
+				const response = await client.sendRequest(
+					ExecuteCommandRequest.type,
+					{
+						command: "manifold.showState",
+						arguments: [editor.document.uri.toString()],
+					}
+				);
+
+				if (!response || !response.states) {
+					window.showWarningMessage(
+						"No Manifold state information is available for this document."
+					);
+					return;
+				}
+
+				traceOutputChannel.clear();
+				traceOutputChannel.appendLine("Manifold state tree:\n");
+				const states = response.states as Record<
+					string,
+					Record<string, string>
+				>;
+				for (const [stateName, props] of Object.entries(states)) {
+					traceOutputChannel.appendLine(`• ${stateName}`);
+					for (const [prop, ty] of Object.entries(props ?? {})) {
+						traceOutputChannel.appendLine(`   ↳ ${prop}: ${ty}`);
+					}
+					traceOutputChannel.appendLine("");
+				}
+				traceOutputChannel.show(true);
+			} catch (error) {
+				window.showErrorMessage(
+					`Unable to fetch Manifold state tree: ${String(error)}`
+				);
+			}
+		}
+	);
+
+	client.onDidChangeState((event) => {
+		switch (event.newState) {
+			case State.Starting:
+				statusItem!.text = "$(sync~spin) Manifold LSP";
+				break;
+			case State.Running:
+				statusItem!.text = "$(zap) Manifold LSP";
+				break;
+			case State.Stopped:
+				statusItem!.text = "$(error) Manifold LSP";
+				break;
+		}
+	});
+
+	await client.start();
+	statusItem!.text = "$(zap) Manifold LSP";
+
+	ctx.subscriptions.push(restartCommand);
+	ctx.subscriptions.push(showStateTreeCommand);
+	ctx.subscriptions.push(statusItem!);
 }
 
 type SelectorConfig = {
@@ -71,6 +171,18 @@ function getDocumentSelectors(): DocumentFilter[] {
 			{
 				language: "html",
 				scheme: "file",
+			},
+			{
+				language: "manifold",
+				scheme: "file",
+			},
+			{
+				language: "manifold-html",
+				scheme: "file",
+			},
+			{
+				language: "html",
+				scheme: "untitled",
 			},
 		]
 	);
@@ -99,10 +211,25 @@ function getDocumentSelectors(): DocumentFilter[] {
 				language: "html",
 				scheme: "file",
 			},
+			{
+				language: "manifold",
+				scheme: "file",
+			},
 		];
 	}
 
 	return normalized;
+}
+
+function mapTraceToRustLog(value: string | undefined): string {
+	switch (value) {
+		case "verbose":
+			return "debug";
+		case "messages":
+			return "info";
+		default:
+			return "error";
+	}
 }
 
 export function deactivate(): Thenable<void> | undefined {

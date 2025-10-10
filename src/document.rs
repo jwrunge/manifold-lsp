@@ -475,11 +475,17 @@ impl<'a> TagScanner<'a> {
                     saw_ignore = true;
                 }
                 _ => {
+                    let name_range = Range::new(
+                        self.line_index.position_at(attr_name_start),
+                        self.line_index.position_at(attr_name_end),
+                    );
+
                     parsed_attributes.push(ParsedAttribute {
                         name,
                         name_lower,
                         span_start: attr_name_start,
                         span_end: attr_end,
+                        name_range,
                         value_range,
                     });
                 }
@@ -573,6 +579,7 @@ impl<'a> TagScanner<'a> {
 
                 self.results.push(ManifoldAttribute {
                     name: attr.name.clone(),
+                    name_range: attr.name_range.clone(),
                     range,
                     start_offset: start,
                     end_offset: end,
@@ -705,6 +712,7 @@ impl<'a> TagScanner<'a> {
                 .collect::<Vec<_>>();
             self.results.push(ManifoldAttribute {
                 name,
+                name_range: range.clone(),
                 range,
                 start_offset: expr_start,
                 end_offset: expr_end,
