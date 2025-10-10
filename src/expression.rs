@@ -86,17 +86,13 @@ pub fn parse_expression_ast(expr: &str) -> Result<Box<Expr>, String> {
     })
 }
 
+#[cfg(test)]
 pub fn validate_expression(
     expr: &str,
     allow_assignments: bool,
     allow_inline_functions: bool,
 ) -> Result<(), String> {
-    let ast = parse_expression_ast(expr)?;
-    let restrictions = Restrictions {
-        allow_assignments,
-        allow_inline_functions,
-    };
-    check_expr(&ast, &restrictions)
+    validate_expression_with_context(expr, allow_assignments, allow_inline_functions, None)
 }
 
 pub fn validate_expression_with_context(
@@ -120,41 +116,6 @@ pub fn validate_expression_with_context(
     }
 
     Ok(())
-}
-
-fn format_syntax_error(error_output: &str) -> String {
-    // Parse the error output to extract meaningful information
-    if error_output.contains("Unexpected token") {
-        if error_output.contains("Expected") {
-            // Try to extract what was expected
-            if let Some(expected_start) = error_output.find("Expected") {
-                if let Some(line_end) = error_output[expected_start..].find('\n') {
-                    let expected_msg = &error_output[expected_start..expected_start + line_end];
-                    return format!("Syntax error: {}. Manifold expressions support basic JavaScript syntax like variables, property access, and simple operations.", expected_msg.trim());
-                }
-            }
-        }
-        return "Syntax error: Unexpected token. Check your expression syntax - Manifold supports variables, property access, function calls, and basic operations.".into();
-    }
-
-    if error_output.contains("Expected expression") {
-        return "Syntax error: Expected an expression. Manifold expressions should be valid JavaScript expressions like variables, calculations, or function calls.".into();
-    }
-
-    if error_output.contains("Unterminated") {
-        if error_output.contains("string") {
-            return "Syntax error: Unterminated string literal. Make sure to close your quotes."
-                .into();
-        }
-        return "Syntax error: Unterminated expression. Check for missing closing brackets, parentheses, or quotes.".into();
-    }
-
-    if error_output.contains("Expected") && error_output.contains("but found") {
-        return "Syntax error: Unexpected character or token. Check your expression syntax.".into();
-    }
-
-    // If we can't parse the specific error, provide a helpful generic message
-    "Invalid expression syntax. Manifold expressions support literals, variables, property access, arithmetic/logical operations, ternary operators, function calls, and array/object literals. For complex logic, define functions in your Manifold state.".into()
 }
 
 fn analyze_syntax_errors(errors: &[swc_ecma_parser::error::Error], expr: &str) -> String {

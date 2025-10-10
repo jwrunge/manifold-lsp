@@ -106,12 +106,6 @@ pub struct DefinitionLocation {
 
 pub type DefinitionIndex = HashMap<(String, String), DefinitionLocation>;
 
-pub fn parse_states_from_scripts(text: &str) -> ManifoldStates {
-    // Backward-compatible entry that ignores unresolved includes.
-    let (states, _unresolved) = parse_states_from_document(text, None);
-    states
-}
-
 pub fn parse_states_from_document(
     text: &str,
     base_dir: Option<&Path>,

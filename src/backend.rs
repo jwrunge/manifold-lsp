@@ -370,7 +370,10 @@ impl LanguageServer for Backend {
 
         if let Some(document) = self.documents.get(&uri) {
             if let Some(attribute) = document.parsed.manifold_attribute_at(&position).cloned() {
-                let range = attribute.range.clone();
+                let range = match attribute.kind {
+                    ManifoldAttributeKind::Attribute => attribute.name_range.clone(),
+                    _ => attribute.range.clone(),
+                };
                 let intro_message = match attribute.kind {
                 ManifoldAttributeKind::Attribute => format!(
                     "`{}` is treated as a Manifold-specific attribute because its element is registered with `data-mf-register`.",
