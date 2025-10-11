@@ -77,27 +77,31 @@ The language server speaks standard LSP, so you can wire it into editors beyond 
 
         ```lua
         require('lspconfig').manifold_html.setup {
-        	cmd = { 'manifold-language-server' },
-        	filetypes = { 'html', 'javascript', 'typescript' },
-        	root_dir = require('lspconfig.util').root_pattern('manifold.config.ts', '.git'),
-        }
-        ```
+
+    cmd = { 'manifold-language-server' },
+    filetypes = { 'html', 'javascript', 'typescript' },
+    root_dir = require('lspconfig.util').find_git_ancestor,
+    }
+    ```
 
         For Vim with [`coc.nvim`](https://github.com/neoclide/coc.nvim), add to `coc-settings.json`:
 
         ```json
         {
-        	"languageserver": {
-        		"manifold": {
-        			"command": "manifold-language-server",
-        			"filetypes": ["html", "javascript", "typescript"],
-        			"rootPatterns": ["manifold.config.ts", ".git"]
-        		}
-        	}
-        }
-        ```
+
+    "languageserver": {
+    "manifold": {
+    "command": "manifold-language-server",
+    "filetypes": ["html", "javascript", "typescript"],
+    "rootPatterns": [".git"]
+    }
+    }
+    }
+    ```
 
 3.  Restart the editor. Opening a Manifold HTML file should now trigger completions, diagnostics, and hovers.
+
+The `root_dir`/`rootPatterns` entries tell your LSP client how to decide where a project boundary lives. Pointing them at `.git` is usually enough; feel free to remove the setting if your editor already scopes workspaces the way you expect.
 
 ### Helix
 
