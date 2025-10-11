@@ -1,138 +1,138 @@
 {
-	"name": "manifold-language-client",
-	"displayName": "Manifold Language Client",
-	"description": "Bring Manifold's reactive HTML authoring experience to VS Code with completions, diagnostics, and type insights.",
-	"license": "MIT",
-	"version": "1.0.0",
-	"publisher": "manifold",
-	"author": {
-		"name": "Manifold Team"
-	},
-	"repository": {
-		"type": "git",
-		"url": "https://github.com/jwrunge/manifold-lsp"
-	},
-	"bugs": {
-		"url": "https://github.com/jwrunge/manifold-lsp/issues"
-	},
-	"homepage": "https://github.com/jwrunge/manifold-lsp",
-	"icon": "media/icon.png",
-	"galleryBanner": {
-		"color": "#121416",
-		"theme": "dark"
-	},
-	"categories": [
-		"Programming Languages",
-		"Linters"
-	],
-	"keywords": [
-		"manifold",
-		"html",
-		"lsp",
-		"language-server",
-		"templating"
-	],
-	"extensionKind": [
-		"workspace"
-	],
-	"engines": {
-		"vscode": "^1.85.0"
-	},
-	"main": "./out/extension.js",
-	"activationEvents": [
-		"onLanguage:html",
-		"onStartupFinished"
-	],
-	"contributes": {
-		"commands": [
-			{
-				"command": "manifoldLanguageServer.toggleTypeHints",
-				"title": "Manifold: Toggle Type Annotations"
-			},
-			{
-				"command": "manifoldLanguageServer.toggleCompletionAutoTrigger",
-				"title": "Manifold: Toggle Auto Suggestions"
-			}
-		],
-		"configuration": {
-			"type": "object",
-			"title": "Manifold Language Server",
-			"properties": {
-				"manifoldLanguageServer.trace.server": {
-					"scope": "window",
-					"type": "string",
-					"enum": [
-						"off",
-						"messages",
-						"verbose"
-					],
-					"default": "off",
-					"description": "Traces the communication between VS Code and the language server."
-				},
-				"manifoldLanguageServer.documentSelectors": {
-					"scope": "resource",
-					"type": "array",
-					"description": "Document selectors (scheme + VS Code language IDs) that should activate the Manifold language server.",
-					"default": [
-						{
-							"scheme": "file",
-							"language": "html"
-						},
-						{
-							"scheme": "file",
-							"language": "javascript"
-						},
-						{
-							"scheme": "file",
-							"language": "typescript"
-						}
-					],
-					"items": {
-						"type": "object",
-						"required": [
-							"language"
-						],
-						"properties": {
-							"scheme": {
-								"type": "string",
-								"description": "The URI scheme to match (defaults to 'file')."
-							},
-							"language": {
-								"type": "string",
-								"description": "VS Code language identifier that should be handled by Manifold."
-							}
-						}
-					}
-				},
-				"manifoldLanguageServer.typeHints.enabled": {
-					"scope": "window",
-					"type": "boolean",
-					"default": true,
-					"description": "Show inline type annotations for Manifold expressions exposed by the language server."
-				},
-				"manifoldLanguageServer.completions.autoTrigger": {
-					"scope": "window",
-					"type": "boolean",
-					"default": true,
-					"description": "Automatically request Manifold-aware completions when typing '.', '${', or attribute quotes."
-				}
-			}
-		}
-	},
-	"scripts": {
-		"vscode:prepublish": "npm run compile",
-		"compile": "tsc -p ./",
-		"watch": "tsc -watch -p ./",
-		"package": "vsce package",
-		"publish": "vsce publish"
-	},
-	"dependencies": {
-		"vscode-languageclient": "9.0.1"
-	},
-	"devDependencies": {
-		"@types/node": "^17.0.18",
-		"@types/vscode": "1.85.0",
-		"typescript": "^4.9.4",
-		"vscode-test": "^1.3.0"
-	}
+    "name": "manifold-language-client",
+    "displayName": "Manifold Language Client",
+    "description": "Bring Manifold's reactive HTML authoring experience to VS Code with completions, diagnostics, and type insights.",
+    "license": "MIT",
+    "version": "1.0.1",
+    "publisher": "manifold",
+    "author": {
+        "name": "Manifold Team"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/jwrunge/manifold-lsp"
+    },
+    "bugs": {
+        "url": "https://github.com/jwrunge/manifold-lsp/issues"
+    },
+    "homepage": "https://github.com/jwrunge/manifold-lsp",
+    "icon": "media/icon.png",
+    "galleryBanner": {
+        "color": "#121416",
+        "theme": "dark"
+    },
+    "categories": [
+        "Programming Languages",
+        "Linters"
+    ],
+    "keywords": [
+        "manifold",
+        "html",
+        "lsp",
+        "language-server",
+        "templating"
+    ],
+    "extensionKind": [
+        "workspace"
+    ],
+    "engines": {
+        "vscode": "^1.85.0"
+    },
+    "main": "./out/extension.js",
+    "activationEvents": [
+        "onLanguage:html",
+        "onStartupFinished"
+    ],
+    "contributes": {
+        "commands": [
+            {
+                "command": "manifoldLanguageServer.toggleTypeHints",
+                "title": "Manifold: Toggle Type Annotations"
+            },
+            {
+                "command": "manifoldLanguageServer.toggleCompletionAutoTrigger",
+                "title": "Manifold: Toggle Auto Suggestions"
+            }
+        ],
+        "configuration": {
+            "type": "object",
+            "title": "Manifold Language Server",
+            "properties": {
+                "manifoldLanguageServer.trace.server": {
+                    "scope": "window",
+                    "type": "string",
+                    "enum": [
+                        "off",
+                        "messages",
+                        "verbose"
+                    ],
+                    "default": "off",
+                    "description": "Traces the communication between VS Code and the language server."
+                },
+                "manifoldLanguageServer.documentSelectors": {
+                    "scope": "resource",
+                    "type": "array",
+                    "description": "Document selectors (scheme + VS Code language IDs) that should activate the Manifold language server.",
+                    "default": [
+                        {
+                            "scheme": "file",
+                            "language": "html"
+                        },
+                        {
+                            "scheme": "file",
+                            "language": "javascript"
+                        },
+                        {
+                            "scheme": "file",
+                            "language": "typescript"
+                        }
+                    ],
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "language"
+                        ],
+                        "properties": {
+                            "scheme": {
+                                "type": "string",
+                                "description": "The URI scheme to match (defaults to 'file')."
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "VS Code language identifier that should be handled by Manifold."
+                            }
+                        }
+                    }
+                },
+                "manifoldLanguageServer.typeHints.enabled": {
+                    "scope": "window",
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show inline type annotations for Manifold expressions exposed by the language server."
+                },
+                "manifoldLanguageServer.completions.autoTrigger": {
+                    "scope": "window",
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically request Manifold-aware completions when typing '.', '${', or attribute quotes."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "package": "vsce package",
+        "publish": "vsce publish"
+    },
+    "dependencies": {
+        "vscode-languageclient": "9.0.1"
+    },
+    "devDependencies": {
+        "@types/node": "^17.0.18",
+        "@types/vscode": "1.85.0",
+        "typescript": "^4.9.4",
+        "vscode-test": "^1.3.0"
+    }
 }
