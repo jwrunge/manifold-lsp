@@ -8,3 +8,5 @@ node_modules/**
 **/*.map
 *.code-workspace
 README.local.md
+README.stub.md
+pnpm-lock.yaml
