@@ -2,6 +2,8 @@ name: Build and Publish VS Code Extension
 
 on:
     push:
+        branches:
+            - release
         tags:
             - "v*"
     release:
@@ -14,14 +16,32 @@ on:
                 default: "false"
 
 jobs:
+    detect-version:
+        runs-on: ubuntu-latest
+        outputs:
+            bumped: ${{ steps.check.outputs.bumped }}
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Check for version bump
+              id: check
+              env:
+                  BEFORE_SHA: ${{ github.event.before }}
+              run: |
+                  python3 scripts/check_version_bump.py --before "${BEFORE_SHA}" --output "$GITHUB_OUTPUT"
+
     build:
+        needs: detect-version
+        if: needs.detect-version.outputs.bumped == 'true'
         runs-on: ubuntu-latest
         env:
             CARGO_TERM_COLOR: always
         steps:
             - name: Checkout repository
               uses: actions/checkout@v4
-
             - name: Set up Rust
               uses: dtolnay/rust-toolchain@stable
 

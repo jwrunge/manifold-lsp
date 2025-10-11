@@ -2,6 +2,8 @@ name: Build and Publish JetBrains Plugin
 
 on:
     push:
+        branches:
+            - release
         tags:
             - "v*"
     release:
@@ -14,12 +16,29 @@ on:
                 default: "false"
 
 jobs:
+    detect-version:
+        runs-on: ubuntu-latest
+        outputs:
+            bumped: ${{ steps.check.outputs.bumped }}
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Check for version bump
+              id: check
+              env:
+                  BEFORE_SHA: ${{ github.event.before }}
+              run: |
+                  python3 scripts/check_version_bump.py --before "${BEFORE_SHA}" --output "$GITHUB_OUTPUT"
+
     build:
+        needs: detect-version
+        if: needs.detect-version.outputs.bumped == 'true'
         runs-on: ubuntu-latest
         env:
             CARGO_TERM_COLOR: always
-            JETBRAINS_MARKETPLACE_TOKEN: "${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}"
-            JETBRAINS_MARKETPLACE_CHANNEL: "${{ secrets.JETBRAINS_MARKETPLACE_CHANNEL }}"
         steps:
             - name: Checkout repository
               uses: actions/checkout@v4
@@ -59,13 +78,12 @@ jobs:
 
             - name: Publish to JetBrains Marketplace
               if: ${{ github.event_name == 'release' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true') }}
+              env:
+                  JETBRAINS_MARKETPLACE_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}
               run: |
                   if [ -z "$JETBRAINS_MARKETPLACE_TOKEN" ]; then
                     echo "JetBrains Marketplace token not provided; skipping publish step."
                     exit 0
-                  fi
-                  if [ -n "$JETBRAINS_MARKETPLACE_CHANNEL" ]; then
-                    export JETBRAINS_MARKETPLACE_CHANNEL
                   fi
                   ./gradlew --no-daemon publishPlugin
               working-directory: jetbrains

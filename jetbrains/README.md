@@ -84,7 +84,8 @@ The language server speaks standard LSP, so you can wire it into editors beyond 
     filetypes = { 'html', 'javascript', 'typescript' },
     root_dir = require('lspconfig.util').find_git_ancestor,
     }
-    ```
+
+    ````
 
         For Vim with [`coc.nvim`](https://github.com/neoclide/coc.nvim), add to `coc-settings.json`:
 
@@ -99,7 +100,7 @@ The language server speaks standard LSP, so you can wire it into editors beyond 
     }
     }
     }
-    ```
+    ````
 
 3.  Restart the editor. Opening a Manifold HTML file should now trigger completions, diagnostics, and hovers.
 
@@ -132,14 +133,14 @@ The `root_dir`/`rootPatterns` entries tell your LSP client how to decide where a
 ### VS Code Marketplace
 
 -   Generate a [Personal Access Token](https://marketplace.visualstudio.com/manage) with “Marketplace → Manage” scope and store it as the `VSCE_TOKEN` GitHub secret.
--   Push a tag like `v1.2.3`, publish a GitHub Release, or manually trigger the “Build and Publish VS Code Extension” workflow with the publish flag to upload the latest `.vsix`.
--   The workflow automatically runs tests, regenerates documentation, and publishes when the token is present; otherwise it only builds and attaches the artifact.
+-   Pushing changes to the `release` branch automatically runs the “Build and Publish VS Code Extension” workflow. The pipeline checks that `Cargo.toml`’s version increased compared to the previous revision; if so, it builds, tests, packages, and publishes the `.vsix`. You can still publish by cutting a tag, releasing in GitHub, or triggering the workflow manually.
+-   When the secret is missing, the workflow still produces the `.vsix` artifact, leaving marketplace upload for a manual run.
 
 ### JetBrains Marketplace
 
--   Create a JetBrains Marketplace permanent token in the Vendor Portal and add it to the repository secrets as `JETBRAINS_MARKETPLACE_TOKEN` (optionally set `JETBRAINS_MARKETPLACE_CHANNEL` to target a custom release channel).
--   Ensure `cargo build --release --bin manifold-language-server` produces the binaries you want to bundle (the CI workflow does this automatically).
--   Trigger the “Build and Publish JetBrains Plugin” workflow via tag/release/dispatch; it copies the compiled server into the plugin, uploads the ZIP artifact, and publishes if the token is configured. Without the token, the workflow still builds and uploads the ZIP for manual submission.
+-   Create a JetBrains Marketplace permanent token in the Vendor Portal and add it to the repository secrets as `JETBRAINS_MARKETPLACE_TOKEN`.
+-   Pushing to the `release` branch kicks off the “Build and Publish JetBrains Plugin” workflow. Like the VS Code pipeline, it only proceeds when the version in `Cargo.toml` moves forward, then builds the Rust server in release mode, packages the plugin ZIP, uploads it as an artifact, and publishes when the secret is present.
+-   If the token is absent, the job still produces the ZIP so you can upload it manually through the vendor portal.
 
 ## JetBrains Plugin Details
 
