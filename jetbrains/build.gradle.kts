@@ -1,4 +1,7 @@
+import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.internal.os.OperatingSystem
+import org.gradle.jvm.tasks.Jar
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm") version "1.9.24"
@@ -13,18 +16,27 @@ repositories {
 }
 
 intellij {
-    version.set("2023.3")
+    version.set("2024.2")
     type.set("IC")
-    plugins.set(listOf("com.intellij.platform.lsp"))
 }
 
 kotlin {
-    jvmToolchain(17)
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.release.set(17)
+}
+
+tasks.withType<Jar>().configureEach {
+    exclude("com/intellij/platform/lsp/api/**")
 }
 
 tasks {
     patchPluginXml {
-        sinceBuild.set("233")
+        sinceBuild.set("242")
         untilBuild.set("")
     }
 
@@ -32,7 +44,7 @@ tasks {
         enabled = false
     }
 
-    val prepareServerBinary by registering<Copy>("prepareServerBinary") {
+    val prepareServerBinary = register<Copy>("prepareServerBinary") {
         description = "Copy the Manifold language server binary into the plugin distribution if present."
         group = "build"
 
@@ -53,10 +65,8 @@ tasks {
 
         onlyIf { binaryToCopy != null }
 
-        if (binaryToCopy != null) {
-            from(binaryToCopy)
-            into(layout.buildDirectory.dir("generated/server/${os.name}").get().asFile)
-        }
+        into(layout.buildDirectory.dir("generated/server/${os.name}"))
+        binaryToCopy?.let { from(it) }
     }
 
     prepareSandbox {

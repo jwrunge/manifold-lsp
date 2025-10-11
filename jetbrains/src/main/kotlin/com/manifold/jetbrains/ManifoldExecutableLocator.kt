@@ -1,7 +1,7 @@
 package com.manifold.jetbrains
 
-import com.intellij.execution.configurations.PathEnvironmentVariableUtil
 import com.intellij.openapi.util.SystemInfoRt
+import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.exists
@@ -38,6 +38,13 @@ object ManifoldExecutableLocator {
 
     private fun locateOnPath(): Path? {
         val binaryName = if (SystemInfoRt.isWindows) "manifold-language-server.exe" else "manifold-language-server"
-        return PathEnvironmentVariableUtil.findExecutableInPath(binaryName)?.toPath()
+        val pathVariable = System.getenv("PATH") ?: return null
+        return pathVariable
+            .split(File.pathSeparator)
+            .asSequence()
+            .mapNotNull { directory ->
+                runCatching { Path.of(directory, binaryName) }.getOrNull()
+            }
+            .firstOrNull { Files.isExecutable(it) }
     }
 }
