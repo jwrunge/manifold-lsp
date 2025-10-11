@@ -66,77 +66,57 @@ This language server supports the following Manifold features:
 </html>
 ```
 
-    print("Hello, world!");
-    print("The meaning of life is...");
+## Other Editors
 
-    if meaning_of_life == 42 {
-        print(meaning_of_life);
-    } else {
-        print("...something we cannot know");
+The language server speaks standard LSP, so you can wire it into editors beyond VS Code and JetBrains.
 
-        print("However, I can tell you that the factorial of 10 is...");
-        // Function calling
-        print(factorial(10));
-    }
+### Vim / Neovim
 
-}
+1.  Install the language server binary (`cargo install --path .` or copy `target/release/manifold-language-server` onto your `PATH`).
+2.  Add an LSP client configuration. For Neovim with `nvim-lspconfig`:
 
-````
-## Introduction
-This repo is a template for `tower-lsp`, a useful github project template which makes writing new language servers easier.
-## Development using VSCode
-1. `pnpm i`
-2. `cargo build`
-3. Open the project in VSCode: `code .`
-4. In VSCode, press <kbd>F5</kbd> or change to the Debug panel and click <kbd>Launch Client</kbd>.
-5. In the newly launched VSCode instance, open the file `examples/test.nrs` from this project.
-6. If the LSP is working correctly you should see syntax highlighting and the features described below should work.
+        ```lua
+        require('lspconfig').manifold_html.setup {
+        	cmd = { 'manifold-language-server' },
+        	filetypes = { 'html', 'javascript', 'typescript' },
+        	root_dir = require('lspconfig.util').root_pattern('manifold.config.ts', '.git'),
+        }
+        ```
 
-> [!note]
-> If encountered errors like `Cannot find module '/xxx/xxx/dist/extension.js'`
-> please try run command `tsc -b` manually, you could refer https://github.com/IWANABETHATGUY/tower-lsp-boilerplate/issues/6 for more details
+        For Vim with [`coc.nvim`](https://github.com/neoclide/coc.nvim), add to `coc-settings.json`:
 
-### Preview and test extension locally with `VsCode`
-1. Make sure all dependency are installed.
-2. Make sure the `nrs-language-server` is under your `PATH`
-3. `pnpm run package`
-4. `code --install-extension nrs-language-server-${version}.vsix`, the `version` you could inspect in file system.
-5. Restart the `VsCode`, and write a minimal `nano rust` file, then inspect the effect.
+        ```json
+        {
+        	"languageserver": {
+        		"manifold": {
+        			"command": "manifold-language-server",
+        			"filetypes": ["html", "javascript", "typescript"],
+        			"rootPatterns": ["manifold.config.ts", ".git"]
+        		}
+        	}
+        }
+        ```
 
-For other editor, please refer the related manual, you could skip steps above.
+3.  Restart the editor. Opening a Manifold HTML file should now trigger completions, diagnostics, and hovers.
 
+### Helix
 
-## Features
-This repo use a language `nano rust` which first introduced by [ chumsky ](https://github.com/zesterer/chumsky/blob/master/examples/nano_rust.rs). Most common language feature has been implemented, you could preview via the video below.
+1.  Ensure `manifold-language-server` is on your `PATH` (or provide an absolute path in the command below).
+2.  Add the following block to your `~/.config/helix/languages.toml`:
 
-- [x] InlayHint for LiteralType
-![inlay hint](https://user-images.githubusercontent.com/17974631/156926412-c3823dac-664e-430e-96c1-c003a86eabb2.gif)
+        ```toml
+        [[language]]
+        name = "html"
+        scope = "text.html.basic"
+        file-types = ["html", "htm"]
 
-- [x] semantic token
-make sure your semantic token is enabled, you could enable your `semantic token` by
-adding this line  to your `settings.json`
-```json
-{
- "editor.semanticHighlighting.enabled": true,
-}
-````
+        [language.language-server]
+        command = "manifold-language-server"
+        args = []
 
--   [x] syntactic error diagnostic
+        [[language.auto-pairs]]
+        open = "${"
+        close = "}"
+        ```
 
-https://user-images.githubusercontent.com/17974631/156926382-a1c4c911-7ea1-4d3a-8e08-3cf7271da170.mp4
-
--   [x] code completion
-
-https://user-images.githubusercontent.com/17974631/156926355-010ef2cd-1d04-435b-bd1e-8b0dab9f44f1.mp4
-
--   [x] go to definition
-
-https://user-images.githubusercontent.com/17974631/156926103-94d90bd3-f31c-44e7-a2ce-4ddfde89bc33.mp4
-
--   [x] find reference
-
-https://user-images.githubusercontent.com/17974631/157367235-7091a36c-631a-4347-9c1e-a3b78db81714.mp4
-
--   [x] rename
-
-https://user-images.githubusercontent.com/17974631/157367229-99903896-5583-4f67-a6da-1ae1cf206876.mp4
+3.  Restart Helix. The server will attach to HTML buffers and provide Manifold-specific assistance.

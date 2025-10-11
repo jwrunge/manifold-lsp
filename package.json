@@ -19,6 +19,7 @@
 	"scripts": {
 		"postinstall": "pnpm --dir client install",
 		"compile": "pnpm --dir client run compile",
+		"sync-readmes": "python3 scripts/generate_readmes.py",
 		"sync-icons": "node scripts/generate_icons.mjs",
 		"check-types": "pnpm --dir client exec tsc --noEmit",
 		"watch": "pnpm --dir client run watch",
