@@ -40,7 +40,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
 	const traceOutputChannel = window.createOutputChannel(
 		"Manifold Language Server trace"
 	);
-	const command = process.env.SERVER_PATH || "nrs-language-server";
+	const command = process.env.SERVER_PATH || "manifold-language-server";
 	const configuration = workspace.getConfiguration("manifoldLanguageServer");
 	const traceSetting = configuration.get<string>("trace.server", "off");
 	const rustLogLevel = mapTraceToRustLog(traceSetting);
@@ -72,7 +72,18 @@ export async function activate(context: ExtensionContext): Promise<void> {
 		serverOptions,
 		clientOptions
 	);
-	await client.start();
+	try {
+		await client.start();
+	} catch (error) {
+		traceOutputChannel.appendLine(
+			`Failed to start Manifold language server with command: ${command}`
+		);
+		traceOutputChannel.appendLine(String(error));
+		void window.showErrorMessage(
+			"Manifold language server failed to launch. Check the output channel for details."
+		);
+		throw error;
+	}
 	context.subscriptions.push({
 		dispose: () => {
 			void client.stop();

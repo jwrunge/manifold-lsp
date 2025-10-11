@@ -18,5 +18,5 @@ swc_ecma_ast = "0.111.1"
 swc_ecma_parser = { version = "0.142.2", features = ["typescript"] }
 
 [[bin]]
-name = "server"
+name = "manifold-language-server"
 path = "src/main.rs"

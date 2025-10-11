@@ -14,6 +14,22 @@
 			},
 			"problemMatcher": ["$tsc"],
 			"detail": "Runs the root pnpm compile script to build the VS Code client before launch."
+		},
+		{
+			"label": "cargo: build language server",
+			"type": "shell",
+			"command": "cargo build --bin manifold-language-server",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"problemMatcher": ["$rustc"],
+			"detail": "Builds the Rust language server binary used by the VS Code extension."
+		},
+		{
+			"label": "prepare: client and server",
+			"dependsOrder": "sequence",
+			"dependsOn": ["cargo: build language server", "pnpm: compile"],
+			"problemMatcher": []
 		}
 	]
 }

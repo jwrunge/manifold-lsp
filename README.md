@@ -24,10 +24,10 @@ This language server supports the following Manifold features:
 
 -   `:if`, `:else`, `:elif` - Conditional rendering
 -   `:each` - List iteration
+-   `:value`, `:checked` - One-way data binding
 -   `:sync:value`, `:sync:checked` - Two-way data binding
 -   `:onclick`, `:onchange`, etc. - Event handlers
 -   `:class`, `:style` - Dynamic styling
--   `:show`, `:hide` - Visibility control
 
 ### Data Attributes
 

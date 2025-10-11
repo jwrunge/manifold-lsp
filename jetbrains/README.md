@@ -26,10 +26,10 @@ This language server supports the following Manifold features:
 
 -   `:if`, `:else`, `:elif` - Conditional rendering
 -   `:each` - List iteration
+-   `:value`, `:checked` - One-way data binding
 -   `:sync:value`, `:sync:checked` - Two-way data binding
 -   `:onclick`, `:onchange`, etc. - Event handlers
 -   `:class`, `:style` - Dynamic styling
--   `:show`, `:hide` - Visibility control
 
 ### Data Attributes
 
@@ -74,54 +74,54 @@ The language server speaks standard LSP, so you can wire it into editors beyond 
 
 ### Vim / Neovim
 
-1. Install the language server binary (`cargo install --path .` or copy `target/release/manifold-language-server` onto your `PATH`).
-2. Add an LSP client configuration. For Neovim with `nvim-lspconfig`:
+1.  Install the language server binary (`cargo install --path .` or copy `target/release/manifold-language-server` onto your `PATH`).
+2.  Add an LSP client configuration. For Neovim with `nvim-lspconfig`:
 
-		```lua
-		require('lspconfig').manifold_html.setup {
-			cmd = { 'manifold-language-server' },
-			filetypes = { 'html', 'javascript', 'typescript' },
-			root_dir = require('lspconfig.util').root_pattern('manifold.config.ts', '.git'),
-		}
-		```
+        ```lua
+        require('lspconfig').manifold_html.setup {
+        	cmd = { 'manifold-language-server' },
+        	filetypes = { 'html', 'javascript', 'typescript' },
+        	root_dir = require('lspconfig.util').root_pattern('manifold.config.ts', '.git'),
+        }
+        ```
 
-		For Vim with [`coc.nvim`](https://github.com/neoclide/coc.nvim), add to `coc-settings.json`:
+        For Vim with [`coc.nvim`](https://github.com/neoclide/coc.nvim), add to `coc-settings.json`:
 
-		```json
-		{
-			"languageserver": {
-				"manifold": {
-					"command": "manifold-language-server",
-					"filetypes": ["html", "javascript", "typescript"],
-					"rootPatterns": ["manifold.config.ts", ".git"]
-				}
-			}
-		}
-		```
+        ```json
+        {
+        	"languageserver": {
+        		"manifold": {
+        			"command": "manifold-language-server",
+        			"filetypes": ["html", "javascript", "typescript"],
+        			"rootPatterns": ["manifold.config.ts", ".git"]
+        		}
+        	}
+        }
+        ```
 
-3. Restart the editor. Opening a Manifold HTML file should now trigger completions, diagnostics, and hovers.
+3.  Restart the editor. Opening a Manifold HTML file should now trigger completions, diagnostics, and hovers.
 
 ### Helix
 
-1. Ensure `manifold-language-server` is on your `PATH` (or provide an absolute path in the command below).
-2. Add the following block to your `~/.config/helix/languages.toml`:
+1.  Ensure `manifold-language-server` is on your `PATH` (or provide an absolute path in the command below).
+2.  Add the following block to your `~/.config/helix/languages.toml`:
 
-		```toml
-		[[language]]
-		name = "html"
-		scope = "text.html.basic"
-		file-types = ["html", "htm"]
+        ```toml
+        [[language]]
+        name = "html"
+        scope = "text.html.basic"
+        file-types = ["html", "htm"]
 
-		[language.language-server]
-		command = "manifold-language-server"
-		args = []
+        [language.language-server]
+        command = "manifold-language-server"
+        args = []
 
-		[[language.auto-pairs]]
-		open = "${"
-		close = "}"
-		```
+        [[language.auto-pairs]]
+        open = "${"
+        close = "}"
+        ```
 
-3. Restart Helix. The server will attach to HTML buffers and provide Manifold-specific assistance.
+3.  Restart Helix. The server will attach to HTML buffers and provide Manifold-specific assistance.
 
 ## JetBrains Plugin Details
 
@@ -129,21 +129,21 @@ The IntelliJ Platform plugin bridges JetBrains IDEs to the Manifold language ser
 
 ### Features
 
-- Starts the `manifold-language-server` executable when HTML documents are opened.
-- Resolves the server binary from a bundled copy, the `MANIFOLD_LSP_BIN` environment variable, or the current `PATH`.
-- Displays an IDE notification if the language server cannot be located.
+-   Starts the `manifold-language-server` executable when HTML documents are opened.
+-   Resolves the server binary from a bundled copy, the `MANIFOLD_LSP_BIN` environment variable, or the current `PATH`.
+-   Displays an IDE notification if the language server cannot be located.
 
 ### Project Structure
 
-- `build.gradle.kts` – IntelliJ Platform Gradle configuration (`org.jetbrains.intellij`).
-- `gradle/` – Gradle wrapper configuration (downloads Gradle 8.x on demand).
-- `src/main/kotlin` – Kotlin sources for the LSP bridge.
-- `src/main/resources/META-INF/plugin.xml` – Plugin metadata and extension point registrations.
+-   `build.gradle.kts` – IntelliJ Platform Gradle configuration (`org.jetbrains.intellij`).
+-   `gradle/` – Gradle wrapper configuration (downloads Gradle 8.x on demand).
+-   `src/main/kotlin` – Kotlin sources for the LSP bridge.
+-   `src/main/resources/META-INF/plugin.xml` – Plugin metadata and extension point registrations.
 
 ### Prerequisites
 
-- JDK 17 or newer.
-- The Manifold language server binary built via Cargo (`cargo build --release` produces `target/release/manifold-language-server`).
+-   JDK 17 or newer.
+-   The Manifold language server binary built via Cargo (`cargo build --release` produces `target/release/manifold-language-server`).
 
 ### Working with the Plugin
 
@@ -183,5 +183,5 @@ Open an HTML document with Manifold annotations (`data-mf-register`, `${...}` ex
 
 ### Next Steps
 
-- Automate packaging of release binaries for each platform and place them in `jetbrains/bin/<platform>/`.
-- Add functional tests using the IntelliJ test framework to verify the LSP handshake.
+-   Automate packaging of release binaries for each platform and place them in `jetbrains/bin/<platform>/`.
+-   Add functional tests using the IntelliJ test framework to verify the LSP handshake.

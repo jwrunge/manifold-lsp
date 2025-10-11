@@ -7,11 +7,11 @@
 			"request": "launch",
 			"name": "Launch Client",
 			"runtimeExecutable": "${execPath}",
-			"args": ["--extensionDevelopmentPath=${workspaceRoot}"],
-			"outFiles": ["${workspaceRoot}/client/out/**/*.js"],
-			"preLaunchTask": "pnpm: compile",
+			"args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+			"outFiles": ["${workspaceFolder}/client/out/**/*.js"],
+			"preLaunchTask": "prepare: client and server",
 			"env": {
-				"SERVER_PATH": "${workspaceRoot}/target/debug/server"
+				"SERVER_PATH": "${workspaceFolder}/target/debug/manifold-language-server"
 			}
 		},
 		{
