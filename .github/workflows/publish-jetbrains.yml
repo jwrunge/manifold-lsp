@@ -1,0 +1,77 @@
+name: Build and Publish JetBrains Plugin
+
+on:
+    push:
+        tags:
+            - "v*"
+    release:
+        types: [published]
+    workflow_dispatch:
+        inputs:
+            publish:
+                description: "Publish to the JetBrains Marketplace"
+                required: false
+                default: "false"
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        env:
+            CARGO_TERM_COLOR: always
+            JETBRAINS_MARKETPLACE_TOKEN: "${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}"
+            JETBRAINS_MARKETPLACE_CHANNEL: "${{ secrets.JETBRAINS_MARKETPLACE_CHANNEL }}"
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Set up Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo registry
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/registry
+                      ~/.cargo/git
+                      target
+                  key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+            - name: Build language server binary (release)
+              run: cargo build --release --bin manifold-language-server
+
+            - name: Synchronize versions
+              run: python3 scripts/sync_versions.py
+
+            - name: Set up Java 17
+              uses: actions/setup-java@v4
+              with:
+                  distribution: "temurin"
+                  java-version: "17"
+                  cache: "gradle"
+
+            - name: Ensure Gradle wrapper is executable
+              run: chmod +x gradlew
+              working-directory: jetbrains
+
+            - name: Build JetBrains plugin
+              run: ./gradlew --no-daemon buildPlugin
+              working-directory: jetbrains
+
+            - name: Publish to JetBrains Marketplace
+              if: ${{ github.event_name == 'release' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true') }}
+              run: |
+                  if [ -z "$JETBRAINS_MARKETPLACE_TOKEN" ]; then
+                    echo "JetBrains Marketplace token not provided; skipping publish step."
+                    exit 0
+                  fi
+                  if [ -n "$JETBRAINS_MARKETPLACE_CHANNEL" ]; then
+                    export JETBRAINS_MARKETPLACE_CHANNEL
+                  fi
+                  ./gradlew --no-daemon publishPlugin
+              working-directory: jetbrains
+
+            - name: Upload plugin artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: manifold-jetbrains-plugin
+                  path: jetbrains/build/distributions/*.zip

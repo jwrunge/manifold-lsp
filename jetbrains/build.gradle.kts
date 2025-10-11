@@ -36,7 +36,7 @@ tasks {
         description = "Copy the Manifold language server binary into the plugin distribution if present."
         group = "build"
 
-    val os = OperatingSystem.current()
+        val os = OperatingSystem.current()
         val binaryName = if (os.isWindows) "manifold-language-server.exe" else "manifold-language-server"
         val projectRoot = projectDir.resolve("..")
         val osDirectory = when {
@@ -67,6 +67,18 @@ tasks {
     }
 
     publishPlugin {
-        token.set(System.getenv("JETBRAINS_MARKETPLACE_TOKEN"))
+        val tokenProvider = providers.environmentVariable("JETBRAINS_MARKETPLACE_TOKEN")
+            .orElse(providers.environmentVariable("JETBRAINS_TOKEN"))
+        token.set(tokenProvider)
+
+        val channelEnv = providers.environmentVariable("JETBRAINS_MARKETPLACE_CHANNEL")
+            .orElse(providers.environmentVariable("JETBRAINS_CHANNEL"))
+        val channelsValue = channelEnv.orNull
+        if (!channelsValue.isNullOrBlank()) {
+            val parsedChannels = channelsValue.split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            channels.set(parsedChannels)
+        }
     }
 }
