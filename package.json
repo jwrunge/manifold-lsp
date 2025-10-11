@@ -19,12 +19,14 @@
 	"scripts": {
 		"postinstall": "pnpm --dir client install",
 		"compile": "pnpm --dir client run compile",
+		"sync-icons": "node scripts/generate_icons.mjs",
 		"check-types": "pnpm --dir client exec tsc --noEmit",
 		"watch": "pnpm --dir client run watch",
 		"package": "pnpm --dir client run package"
 	},
 	"devDependencies": {
-		"@vscode/vsce": "^3.2.1"
+		"@vscode/vsce": "^3.2.1",
+		"sharp": "^0.34.4"
 	},
 	"packageManager": "pnpm@8.15.7"
 }
