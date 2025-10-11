@@ -3,7 +3,7 @@
 	"displayName": "Manifold Language Client",
 	"description": "Bring Manifold's reactive HTML authoring experience to VS Code with completions, diagnostics, and type insights.",
 	"license": "SEE LICENSE IN LICENSE",
-	"version": "1.0.4",
+	"version": "1.0.5",
 	"publisher": "manifold",
 	"author": {
 		"name": "Manifold Team"
