@@ -15,6 +15,7 @@ pub struct ManifoldAttribute {
     pub range: Range,
     pub start_offset: usize,
     pub end_offset: usize,
+    pub value_range: Option<(usize, usize)>,
     pub kind: ManifoldAttributeKind,
     pub expression: Option<String>,
     pub expression_span: Option<(usize, usize)>,

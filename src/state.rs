@@ -2,12 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::sink;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 
 use swc_common::{
     errors::{EmitterWriter, Handler, HANDLER},
     sync::Lrc,
-    FileName, SourceMap, GLOBALS,
+    FileName, SourceMap, Span, GLOBALS,
 };
 use swc_ecma_ast::EsVersion;
 use swc_ecma_ast::{
@@ -45,7 +46,7 @@ impl TypeInfo {
                         .map(|(name, ty)| format!("{}: {}", name, ty.describe()))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    format!("{{ {} }}", fields)
+                    format!("{{ {fields} }}")
                 }
             }
         }
@@ -106,6 +107,104 @@ pub struct DefinitionLocation {
 
 pub type DefinitionIndex = HashMap<(String, String), DefinitionLocation>;
 
+#[derive(Clone)]
+struct FileHandle {
+    path: PathBuf,
+    content: Arc<String>,
+    line_index: Arc<crate::lineindex::LineIndex>,
+}
+
+impl FileHandle {
+    fn new(path: PathBuf, content: String) -> Self {
+        let content_arc = Arc::new(content);
+        let line_index = Arc::new(crate::lineindex::LineIndex::new(content_arc.as_str()));
+        Self {
+            path,
+            content: content_arc,
+            line_index,
+        }
+    }
+}
+
+struct CachedFile {
+    handle: FileHandle,
+    module: Option<Arc<Module>>,
+}
+
+impl CachedFile {
+    fn new(path: PathBuf, content: String) -> Self {
+        Self {
+            handle: FileHandle::new(path, content),
+            module: None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct FileCache {
+    files: HashMap<PathBuf, CachedFile>,
+}
+
+impl FileCache {
+    fn get_handle(&self, path: &Path) -> Option<FileHandle> {
+        self.files.get(path).map(|entry| entry.handle.clone())
+    }
+
+    fn resolve_script(&mut self, specifier: &str, base: &Path) -> Option<FileHandle> {
+        if !(specifier.starts_with('.') || specifier.starts_with('/')) {
+            return None;
+        }
+
+        let joined = if specifier.starts_with('/') {
+            PathBuf::from(specifier)
+        } else {
+            base.join(specifier)
+        };
+
+        let candidates = vec![
+            joined.clone(),
+            joined.with_extension("ts"),
+            joined.with_extension("js"),
+            joined.with_extension("mjs"),
+            joined.with_extension("cjs"),
+            joined.join("index.ts"),
+            joined.join("index.js"),
+            joined.join("index.mjs"),
+            joined.join("index.cjs"),
+        ];
+
+        for candidate in candidates {
+            let canonical = canonical_or(candidate.clone());
+            if let Some(handle) = self.get_handle(&canonical) {
+                return Some(handle);
+            }
+            if let Ok(content) = fs::read_to_string(&candidate) {
+                let canonical = canonical_or(candidate);
+                let cached = CachedFile::new(canonical.clone(), content);
+                let handle = cached.handle.clone();
+                self.files.insert(canonical.clone(), cached);
+                return Some(handle);
+            }
+        }
+
+        None
+    }
+
+    fn ensure_module(&mut self, path: &Path) -> Option<Arc<Module>> {
+        if let Some(entry) = self.files.get_mut(path) {
+            if let Some(module) = &entry.module {
+                return Some(module.clone());
+            }
+            if let Some(parsed) = parse_script_module(&entry.handle.content) {
+                let arc = Arc::new(parsed);
+                entry.module = Some(arc.clone());
+                return Some(arc);
+            }
+        }
+        None
+    }
+}
+
 pub fn parse_states_from_document(
     text: &str,
     base_dir: Option<&Path>,
@@ -117,13 +216,22 @@ pub fn parse_states_from_document(
     let base = base_dir.or(default_base.as_deref());
     let mut unresolved: Vec<String> = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut file_cache = FileCache::default();
 
     // Parse inline scripts, follow imports
     for script in inline_scripts {
         if let Some(module) = parse_script_module(&script) {
             process_module_for_states(&module, &mut states);
             if let Some(base) = base {
-                follow_imports(&module, base, &mut states, &mut visited, &mut unresolved, 0);
+                follow_imports(
+                    &module,
+                    base,
+                    &mut states,
+                    &mut visited,
+                    &mut unresolved,
+                    0,
+                    &mut file_cache,
+                );
             }
         }
     }
@@ -131,11 +239,21 @@ pub fn parse_states_from_document(
     // Parse classic/extern scripts referenced via src
     for src in srcs {
         if let Some(base) = base {
-            if let Some((content, pathbuf)) = resolve_and_read(&src, base) {
-                visited.insert(pathbuf);
-                if let Some(module) = parse_script_module(&content) {
-                    process_module_for_states(&module, &mut states);
-                    follow_imports(&module, base, &mut states, &mut visited, &mut unresolved, 0);
+            if let Some(handle) = file_cache.resolve_script(&src, base) {
+                if visited.insert(handle.path.clone()) {
+                    if let Some(module) = file_cache.ensure_module(&handle.path) {
+                        process_module_for_states(module.as_ref(), &mut states);
+                        let next_base = handle.path.parent().unwrap_or(base);
+                        follow_imports(
+                            module.as_ref(),
+                            next_base,
+                            &mut states,
+                            &mut visited,
+                            &mut unresolved,
+                            0,
+                            &mut file_cache,
+                        );
+                    }
                 }
             } else {
                 unresolved.push(src);
@@ -159,47 +277,77 @@ pub fn build_definition_index(
     let html_li = crate::lineindex::LineIndex::new(html_text);
 
     let default_base = html_path
-        .map(|p| p.parent().map(|pp| pp.to_path_buf()))
-        .flatten()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
     let mut unresolved: Vec<String> = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut file_cache = FileCache::default();
 
     // Inline scripts: parse and harvest definitions; positions map to HTML URI
     for (script, start) in inline_scripts.iter().zip(starts.iter()) {
         if let Some(module) = parse_script_module(script) {
             // Collect property names per state
-            let mut defs = Vec::<(String, String)>::new();
-            for item in module.body.clone() {
+            let mut defs = Vec::<(String, PropertyDefinition)>::new();
+            for item in &module.body {
                 if let Some(definition) = analyze_module_item(item) {
                     let state_name = definition.name.unwrap_or_else(|| "default".to_string());
-                    for (prop, _ty) in definition.properties.into_iter() {
+                    for prop in definition.properties {
                         defs.push((state_name.clone(), prop));
                     }
                 }
             }
             // Simple text search to locate property occurrences
             for (state_name, prop) in defs {
-                if let Some(pos) = script
-                    .find(&format!("add(\"{}\"", prop))
-                    .or_else(|| script.find(&format!(".add(\"{}\"", prop)))
-                    .or_else(|| script.find(&format!("add('{}'", prop)))
-                    .or_else(|| script.find(&format!(".add('{}'", prop)))
+                let mut recorded = false;
+                if let Some(span) = prop.span {
+                    if let Some((start_rel, end_rel)) = literal_body_range(span, script) {
+                        if let Some(uri) = html_uri.clone() {
+                            let absolute = *start + start_rel;
+                            let p = html_li.position_at(absolute);
+                            index.insert(
+                                (state_name.clone(), prop.name.clone()),
+                                DefinitionLocation {
+                                    uri,
+                                    line: p.line,
+                                    character: p.character,
+                                    length: slice_char_length(script, start_rel, end_rel),
+                                },
+                            );
+                            recorded = true;
+                        }
+                    }
+                }
+
+                if recorded {
+                    continue;
+                }
+
+                if let Some(method_pos) = script
+                    .find(&format!("add(\"{}\"", prop.name))
+                    .or_else(|| script.find(&format!(".add(\"{}\"", prop.name)))
+                    .or_else(|| script.find(&format!("add('{}'", prop.name)))
+                    .or_else(|| script.find(&format!(".add('{}'", prop.name)))
                 {
-                    let absolute = *start + pos;
-                    let p = html_li.position_at(absolute);
-                    if let Some(uri) = html_uri.clone() {
-                        index.insert(
-                            (state_name.clone(), prop.clone()),
-                            DefinitionLocation {
-                                uri,
-                                line: p.line,
-                                character: p.character,
-                                length: prop.len() as u32,
-                            },
-                        );
+                    let quote_offset = script[method_pos..]
+                        .find('"')
+                        .or_else(|| script[method_pos..].find('\''));
+                    if let Some(quote_rel) = quote_offset {
+                        let prop_start_rel = method_pos + quote_rel + 1;
+                        let absolute = *start + prop_start_rel;
+                        let p = html_li.position_at(absolute);
+                        if let Some(uri) = html_uri.clone() {
+                            index.insert(
+                                (state_name.clone(), prop.name.clone()),
+                                DefinitionLocation {
+                                    uri,
+                                    line: p.line,
+                                    character: p.character,
+                                    length: prop.name.len() as u32,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -212,25 +360,31 @@ pub fn build_definition_index(
                 &mut visited,
                 &mut unresolved,
                 0,
+                &mut file_cache,
             );
         }
     }
 
     // External scripts via src
     for src in srcs {
-        if let Some((content, pathbuf)) = resolve_and_read(&src, &default_base) {
-            if visited.insert(pathbuf.clone()) {
-                let li = crate::lineindex::LineIndex::new(&content);
-                if let Some(module) = parse_script_module(&content) {
-                    harvest_definitions_from_module(&module, &content, &pathbuf, &li, &mut index);
-                    // follow imports and harvest more
+        if let Some(handle) = file_cache.resolve_script(&src, &default_base) {
+            if visited.insert(handle.path.clone()) {
+                if let Some(module) = file_cache.ensure_module(&handle.path) {
+                    harvest_definitions_from_module(
+                        module.as_ref(),
+                        &handle.content,
+                        &handle.path,
+                        handle.line_index.as_ref(),
+                        &mut index,
+                    );
                     collect_defs_from_imports(
-                        &module,
-                        &pathbuf.parent().unwrap_or(&default_base).to_path_buf(),
+                        module.as_ref(),
+                        handle.path.parent().unwrap_or(&default_base),
                         &mut index,
                         &mut visited,
                         &mut unresolved,
                         0,
+                        &mut file_cache,
                     );
                 }
             }
@@ -258,20 +412,45 @@ pub fn build_state_name_index(
 
     let mut unresolved: Vec<String> = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut file_cache = FileCache::default();
 
     // Inline scripts
     for (script, start) in inline_scripts.iter().zip(starts.iter()) {
         if let Some(module) = parse_script_module(script) {
             // Collect state names
-            let mut names: Vec<String> = Vec::new();
-            for item in module.body.clone() {
+            let mut names: Vec<(String, Option<Span>)> = Vec::new();
+            for item in &module.body {
                 if let Some(definition) = analyze_module_item(item) {
                     if let Some(name) = definition.name {
-                        names.push(name);
+                        names.push((name, definition.name_span));
                     }
                 }
             }
-            for name in names {
+            for (name, span) in names {
+                let mut recorded = false;
+                if let Some(span) = span {
+                    if let Some((start_rel, end_rel)) = literal_body_range(span, script) {
+                        if let Some(uri) = html_uri.clone() {
+                            let absolute = *start + start_rel;
+                            let p = html_li.position_at(absolute);
+                            index.insert(
+                                name.clone(),
+                                DefinitionLocation {
+                                    uri,
+                                    line: p.line,
+                                    character: p.character,
+                                    length: slice_char_length(script, start_rel, end_rel),
+                                },
+                            );
+                            recorded = true;
+                        }
+                    }
+                }
+
+                if recorded {
+                    continue;
+                }
+
                 if let Some(pos) = find_create_call(script, &name) {
                     if let Some(uri) = html_uri.clone() {
                         let absolute = *start + pos;
@@ -288,23 +467,39 @@ pub fn build_state_name_index(
                     }
                 }
             }
+
+            collect_state_names_from_imports(
+                &module,
+                &default_base,
+                &mut index,
+                &mut visited,
+                &mut unresolved,
+                0,
+                &mut file_cache,
+            );
         }
     }
 
     // External scripts via src
     for src in srcs {
-        if let Some((content, pathbuf)) = resolve_and_read(&src, &default_base) {
-            if visited.insert(pathbuf.clone()) {
-                let li = crate::lineindex::LineIndex::new(&content);
-                if let Some(module) = parse_script_module(&content) {
-                    harvest_state_names_from_module(&module, &content, &pathbuf, &li, &mut index);
+        if let Some(handle) = file_cache.resolve_script(&src, &default_base) {
+            if visited.insert(handle.path.clone()) {
+                if let Some(module) = file_cache.ensure_module(&handle.path) {
+                    harvest_state_names_from_module(
+                        module.as_ref(),
+                        &handle.content,
+                        &handle.path,
+                        handle.line_index.as_ref(),
+                        &mut index,
+                    );
                     collect_state_names_from_imports(
-                        &module,
-                        &pathbuf.parent().unwrap_or(&default_base).to_path_buf(),
+                        module.as_ref(),
+                        handle.path.parent().unwrap_or(&default_base),
                         &mut index,
                         &mut visited,
                         &mut unresolved,
                         0,
+                        &mut file_cache,
                     );
                 }
             }
@@ -316,12 +511,57 @@ pub fn build_state_name_index(
     (index, unresolved)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HTML: &str = r#"
+        <div data-mf-register>
+            <button :onclick="count++">Increment</button>
+            <button :onclick="items.push(item)">Add</button>
+        </div>
+        <div data-mf-register="secondary">
+            <p>${message}</p>
+        </div>
+        <script type="module">
+            const state = Manifold.create()
+                .add("count", 0)
+                .add("items", [])
+                .add("message", "hi")
+                .build();
+
+            const secondary = Manifold.create("secondary")
+                .add("message", "from secondary")
+                .build();
+        </script>
+    "#;
+
+    #[test]
+    fn definition_index_includes_inline_state_properties() {
+        let (index, unresolved) =
+            build_definition_index(HTML, Some(Path::new("/virtual/test.html")));
+        assert!(unresolved.is_empty());
+
+        let key = ("default".to_string(), "count".to_string());
+        let definition = index.get(&key).expect("count definition present");
+        assert!(definition.length >= 5);
+    }
+
+    #[test]
+    fn state_name_index_tracks_custom_register_values() {
+        let (state_map, unresolved) =
+            build_state_name_index(HTML, Some(Path::new("/virtual/test.html")));
+        assert!(unresolved.is_empty());
+        assert!(state_map.contains_key("secondary"));
+    }
+}
+
 fn find_create_call(content: &str, name: &str) -> Option<usize> {
     [
-        format!("create(\"{}\")", name),
-        format!(".create(\"{}\")", name),
-        format!("create('{}')", name),
-        format!(".create('{}')", name),
+        format!("create(\"{name}\")"),
+        format!(".create(\"{name}\")"),
+        format!("create('{name}')"),
+        format!(".create('{name}')"),
     ]
     .into_iter()
     .find_map(|p| content.find(&p))
@@ -435,7 +675,7 @@ fn extract_script_blocks_srcs_with_starts(text: &str) -> (Vec<String>, Vec<Strin
 fn find_attribute_value(tag_open: &str, attr: &str) -> Option<String> {
     // naive attribute extractor for src="..." or src='...'
     let lower = tag_open.to_ascii_lowercase();
-    let needle = format!("{}=", attr);
+    let needle = format!("{attr}=");
     let mut i = 0usize;
     while let Some(pos) = lower[i..].find(&needle) {
         let idx = i + pos + needle.len();
@@ -456,12 +696,12 @@ fn find_attribute_value(tag_open: &str, attr: &str) -> Option<String> {
 }
 
 fn process_module_for_states(module: &Module, states: &mut ManifoldStates) {
-    for item in module.body.clone() {
+    for item in &module.body {
         if let Some(definition) = analyze_module_item(item) {
             let name = definition.name.unwrap_or_else(|| "default".to_string());
             let mut state = states.remove(&name).unwrap_or_else(ManifoldState::new);
-            for (prop, ty) in definition.properties {
-                state.set_property(prop, ty);
+            for prop in definition.properties {
+                state.set_property(prop.name, prop.ty);
             }
             states.insert(name, state);
         }
@@ -475,23 +715,26 @@ fn follow_imports(
     visited: &mut HashSet<PathBuf>,
     unresolved: &mut Vec<String>,
     depth: usize,
+    cache: &mut FileCache,
 ) {
     if depth > 16 {
         return; // reasonable safety cap
     }
     let imports = collect_import_paths(module);
     for import in imports {
-        if let Some((content, pathbuf)) = resolve_and_read(&import, base) {
-            if visited.insert(pathbuf.clone()) {
-                if let Some(child) = parse_script_module(&content) {
-                    process_module_for_states(&child, states);
+        if let Some(handle) = cache.resolve_script(&import, base) {
+            if visited.insert(handle.path.clone()) {
+                if let Some(child) = cache.ensure_module(&handle.path) {
+                    process_module_for_states(child.as_ref(), states);
+                    let next_base = handle.path.parent().unwrap_or(base);
                     follow_imports(
-                        &child,
-                        &pathbuf.parent().unwrap_or(base).to_path_buf(),
+                        child.as_ref(),
+                        next_base,
                         states,
                         visited,
                         unresolved,
                         depth + 1,
+                        cache,
                     );
                 }
             }
@@ -524,34 +767,6 @@ fn collect_import_paths(module: &Module) -> Vec<String> {
     paths
 }
 
-fn resolve_and_read(specifier: &str, base: &Path) -> Option<(String, PathBuf)> {
-    // Resolve relative and absolute paths; ignore bare specifiers (e.g., 'react')
-    if specifier.starts_with('.') || specifier.starts_with('/') {
-        let joined = if specifier.starts_with('/') {
-            PathBuf::from(specifier)
-        } else {
-            base.join(specifier)
-        };
-        let candidates = vec![
-            joined.clone(),
-            joined.with_extension("ts"),
-            joined.with_extension("js"),
-            joined.with_extension("mjs"),
-            joined.with_extension("cjs"),
-            joined.join("index.ts"),
-            joined.join("index.js"),
-            joined.join("index.mjs"),
-            joined.join("index.cjs"),
-        ];
-        for path in candidates {
-            if let Ok(content) = fs::read_to_string(&path) {
-                return Some((content, canonical_or(path)));
-            }
-        }
-    }
-    None
-}
-
 fn canonical_or(path: PathBuf) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
 }
@@ -563,28 +778,56 @@ fn harvest_definitions_from_module(
     li: &crate::lineindex::LineIndex,
     index: &mut DefinitionIndex,
 ) {
-    for item in module.body.clone() {
+    for item in &module.body {
         if let Some(definition) = analyze_module_item(item) {
             let state_name = definition.name.unwrap_or_else(|| "default".to_string());
-            for (prop, _ty) in definition.properties.into_iter() {
-                // naive text search to get position
-                if let Some(pos) = content
-                    .find(&format!("add(\"{}\"", prop))
-                    .or_else(|| content.find(&format!(".add(\"{}\"", prop)))
-                    .or_else(|| content.find(&format!("add('{}'", prop)))
-                    .or_else(|| content.find(&format!(".add('{}'", prop)))
+            for prop in definition.properties {
+                let mut recorded = false;
+                if let Some(span) = prop.span {
+                    if let Some((start, end)) = literal_body_range(span, content) {
+                        if let Ok(uri) = Url::from_file_path(file_path) {
+                            let p = li.position_at(start);
+                            index.insert(
+                                (state_name.clone(), prop.name.clone()),
+                                DefinitionLocation {
+                                    uri,
+                                    line: p.line,
+                                    character: p.character,
+                                    length: slice_char_length(content, start, end),
+                                },
+                            );
+                            recorded = true;
+                        }
+                    }
+                }
+
+                if recorded {
+                    continue;
+                }
+
+                if let Some(method_pos) = content
+                    .find(&format!("add(\"{}\"", prop.name))
+                    .or_else(|| content.find(&format!(".add(\"{}\"", prop.name)))
+                    .or_else(|| content.find(&format!("add('{}'", prop.name)))
+                    .or_else(|| content.find(&format!(".add('{}'", prop.name)))
                 {
-                    if let Ok(uri) = Url::from_file_path(file_path) {
-                        let p = li.position_at(pos);
-                        index.insert(
-                            (state_name.clone(), prop.clone()),
-                            DefinitionLocation {
-                                uri,
-                                line: p.line,
-                                character: p.character,
-                                length: prop.len() as u32,
-                            },
-                        );
+                    let quote_offset = content[method_pos..]
+                        .find('"')
+                        .or_else(|| content[method_pos..].find('\''));
+                    if let Some(quote_rel) = quote_offset {
+                        let prop_start = method_pos + quote_rel + 1;
+                        if let Ok(uri) = Url::from_file_path(file_path) {
+                            let p = li.position_at(prop_start);
+                            index.insert(
+                                (state_name.clone(), prop.name.clone()),
+                                DefinitionLocation {
+                                    uri,
+                                    line: p.line,
+                                    character: p.character,
+                                    length: prop.name.len() as u32,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -599,24 +842,32 @@ fn collect_defs_from_imports(
     visited: &mut HashSet<PathBuf>,
     unresolved: &mut Vec<String>,
     depth: usize,
+    cache: &mut FileCache,
 ) {
     if depth > 16 {
         return;
     }
     let imports = collect_import_paths(module);
     for import in imports {
-        if let Some((content, pathbuf)) = resolve_and_read(&import, base) {
-            if visited.insert(pathbuf.clone()) {
-                let li = crate::lineindex::LineIndex::new(&content);
-                if let Some(child) = parse_script_module(&content) {
-                    harvest_definitions_from_module(&child, &content, &pathbuf, &li, index);
+        if let Some(handle) = cache.resolve_script(&import, base) {
+            if visited.insert(handle.path.clone()) {
+                if let Some(child) = cache.ensure_module(&handle.path) {
+                    harvest_definitions_from_module(
+                        child.as_ref(),
+                        &handle.content,
+                        &handle.path,
+                        handle.line_index.as_ref(),
+                        index,
+                    );
+                    let next_base = handle.path.parent().unwrap_or(base);
                     collect_defs_from_imports(
-                        &child,
-                        &pathbuf.parent().unwrap_or(base).to_path_buf(),
+                        child.as_ref(),
+                        next_base,
                         index,
                         visited,
                         unresolved,
                         depth + 1,
+                        cache,
                     );
                 }
             }
@@ -633,9 +884,32 @@ fn harvest_state_names_from_module(
     li: &crate::lineindex::LineIndex,
     index: &mut HashMap<String, DefinitionLocation>,
 ) {
-    for item in module.body.clone() {
+    for item in &module.body {
         if let Some(definition) = analyze_module_item(item) {
             if let Some(name) = definition.name {
+                let mut recorded = false;
+                if let Some(span) = definition.name_span {
+                    if let Some((start, end)) = literal_body_range(span, content) {
+                        if let Ok(uri) = Url::from_file_path(file_path) {
+                            let p = li.position_at(start);
+                            index.insert(
+                                name.clone(),
+                                DefinitionLocation {
+                                    uri,
+                                    line: p.line,
+                                    character: p.character,
+                                    length: slice_char_length(content, start, end),
+                                },
+                            );
+                            recorded = true;
+                        }
+                    }
+                }
+
+                if recorded {
+                    continue;
+                }
+
                 if let Some(pos) = find_create_call(content, &name) {
                     if let Ok(uri) = Url::from_file_path(file_path) {
                         let p = li.position_at(pos);
@@ -662,24 +936,32 @@ fn collect_state_names_from_imports(
     visited: &mut HashSet<PathBuf>,
     unresolved: &mut Vec<String>,
     depth: usize,
+    cache: &mut FileCache,
 ) {
     if depth > 16 {
         return;
     }
     let imports = collect_import_paths(module);
     for import in imports {
-        if let Some((content, pathbuf)) = resolve_and_read(&import, base) {
-            if visited.insert(pathbuf.clone()) {
-                let li = crate::lineindex::LineIndex::new(&content);
-                if let Some(child) = parse_script_module(&content) {
-                    harvest_state_names_from_module(&child, &content, &pathbuf, &li, index);
+        if let Some(handle) = cache.resolve_script(&import, base) {
+            if visited.insert(handle.path.clone()) {
+                if let Some(child) = cache.ensure_module(&handle.path) {
+                    harvest_state_names_from_module(
+                        child.as_ref(),
+                        &handle.content,
+                        &handle.path,
+                        handle.line_index.as_ref(),
+                        index,
+                    );
+                    let next_base = handle.path.parent().unwrap_or(base);
                     collect_state_names_from_imports(
-                        &child,
-                        &pathbuf.parent().unwrap_or(base).to_path_buf(),
+                        child.as_ref(),
+                        next_base,
                         index,
                         visited,
                         unresolved,
                         depth + 1,
+                        cache,
                     );
                 }
             }
@@ -687,6 +969,44 @@ fn collect_state_names_from_imports(
             unresolved.push(import);
         }
     }
+}
+
+fn span_to_byte_range(span: Span) -> Option<(usize, usize)> {
+    let lo = span.lo.0;
+    let hi = span.hi.0;
+    if hi < lo {
+        return None;
+    }
+    let start = lo.checked_sub(1)? as usize;
+    let len = (hi - lo) as usize;
+    let end = start + len;
+    Some((start, end))
+}
+
+fn literal_body_range(span: Span, text: &str) -> Option<(usize, usize)> {
+    let (start, end) = span_to_byte_range(span)?;
+    if end > text.len() {
+        return None;
+    }
+    if end <= start {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    if end - start >= 2 {
+        let first = bytes.get(start)?;
+        let last = bytes.get(end - 1)?;
+        if (*first == b'"' && *last == b'"') || (*first == b'\'' && *last == b'\'') {
+            return Some((start + 1, end - 1));
+        }
+        if *first == b'`' && *last == b'`' {
+            return Some((start + 1, end - 1));
+        }
+    }
+    Some((start, end))
+}
+
+fn slice_char_length(text: &str, start: usize, end: usize) -> u32 {
+    text[start..end].chars().count() as u32
 }
 
 fn parse_script_module(script: &str) -> Option<Module> {
@@ -722,49 +1042,42 @@ fn parse_script_module(script: &str) -> Option<Module> {
     })
 }
 
+#[derive(Clone)]
+struct PropertyDefinition {
+    name: String,
+    ty: TypeInfo,
+    span: Option<Span>,
+}
+
 #[derive(Default)]
 struct StateDefinition {
     name: Option<String>,
-    properties: HashMap<String, TypeInfo>,
+    name_span: Option<Span>,
+    properties: Vec<PropertyDefinition>,
 }
 
-fn analyze_module_item(item: ModuleItem) -> Option<StateDefinition> {
+fn analyze_module_item(item: &ModuleItem) -> Option<StateDefinition> {
     match item {
-        ModuleItem::Stmt(stmt) => match stmt {
-            swc_ecma_ast::Stmt::Decl(decl) => match decl {
-                swc_ecma_ast::Decl::Var(var_decl) => {
-                    for declarator in var_decl.decls {
-                        if let Some(init) = declarator.init {
-                            if let Some(def) = analyze_expression(init.as_ref()) {
-                                return Some(def);
-                            }
-                        }
-                    }
-                    None
-                }
-                _ => None,
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl)))
+        | ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDecl(
+            swc_ecma_ast::ExportDecl {
+                decl: swc_ecma_ast::Decl::Var(var_decl),
+                ..
             },
-            _ => None,
-        },
-        ModuleItem::ModuleDecl(module_decl) => match module_decl {
-            swc_ecma_ast::ModuleDecl::ExportDecl(export_decl) => match export_decl.decl {
-                swc_ecma_ast::Decl::Var(var_decl) => {
-                    for declarator in var_decl.decls {
-                        if let Some(init) = declarator.init {
-                            if let Some(def) = analyze_expression(init.as_ref()) {
-                                return Some(def);
-                            }
-                        }
+        )) => {
+            for declarator in &var_decl.decls {
+                if let Some(init) = declarator.init.as_ref() {
+                    if let Some(def) = analyze_expression(init.as_ref()) {
+                        return Some(def);
                     }
-                    None
                 }
-                _ => None,
-            },
-            swc_ecma_ast::ModuleDecl::ExportDefaultExpr(default_expr) => {
-                analyze_expression(&default_expr.expr)
             }
-            _ => None,
-        },
+            None
+        }
+        ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDefaultExpr(default_expr)) => {
+            analyze_expression(&default_expr.expr)
+        }
+        ModuleItem::Stmt(_) | ModuleItem::ModuleDecl(_) => None,
     }
 }
 
@@ -774,9 +1087,10 @@ fn analyze_expression(expr: &Expr) -> Option<StateDefinition> {
             if let Expr::Member(member) = &**callee {
                 if property_name(member)? == "build" {
                     let mut definition = StateDefinition::default();
-                    if let Some(arg) = call.args.get(0) {
-                        if let Some(name) = string_from_expr(&arg.expr) {
+                    if let Some(arg) = call.args.first() {
+                        if let Some((name, span)) = string_from_expr(&arg.expr) {
                             definition.name = Some(name);
+                            definition.name_span = span;
                         }
                     }
                     collect_chain(&member.obj, &mut definition)?;
@@ -798,15 +1112,19 @@ fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
                         "add" => {
                             if let Some(ExprOrSpread {
                                 expr: prop_expr, ..
-                            }) = call.args.get(0)
+                            }) = call.args.first()
                             {
-                                if let Some(prop_name) = string_from_expr(prop_expr) {
+                                if let Some((prop_name, span)) = string_from_expr(prop_expr) {
                                     let ty = call
                                         .args
                                         .get(1)
                                         .and_then(|arg| infer_type_from_expr(&arg.expr))
                                         .unwrap_or(TypeInfo::Any);
-                                    definition.properties.insert(prop_name, ty);
+                                    definition.properties.push(PropertyDefinition {
+                                        name: prop_name,
+                                        ty,
+                                        span,
+                                    });
                                 }
                             }
                             collect_chain(&member.obj, definition)
@@ -815,10 +1133,11 @@ fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
                             if definition.name.is_none() {
                                 if let Some(ExprOrSpread {
                                     expr: name_expr, ..
-                                }) = call.args.get(0)
+                                }) = call.args.first()
                                 {
-                                    if let Some(name) = string_from_expr(name_expr) {
+                                    if let Some((name, span)) = string_from_expr(name_expr) {
                                         definition.name = Some(name);
+                                        definition.name_span = span;
                                     }
                                 }
                             }
@@ -834,13 +1153,7 @@ fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
             }
         }
         Expr::Member(member) => collect_chain(&member.obj, definition),
-        Expr::Ident(ident) => {
-            if ident.sym == *"Manifold" {
-                Some(())
-            } else {
-                Some(())
-            }
-        }
+        Expr::Ident(_) => Some(()),
         _ => Some(()),
     }
 }
@@ -852,11 +1165,11 @@ fn property_name(member: &MemberExpr) -> Option<String> {
     }
 }
 
-fn string_from_expr(expr: &Expr) -> Option<String> {
+fn string_from_expr(expr: &Expr) -> Option<(String, Option<Span>)> {
     match expr {
-        Expr::Lit(Lit::Str(str_lit)) => Some(str_lit.value.to_string()),
-        Expr::Lit(Lit::Bool(b)) => Some(b.value.to_string()),
-        Expr::Ident(Ident { sym, .. }) => Some(sym.to_string()),
+        Expr::Lit(Lit::Str(str_lit)) => Some((str_lit.value.to_string(), Some(str_lit.span))),
+        Expr::Lit(Lit::Bool(b)) => Some((b.value.to_string(), Some(b.span))),
+        Expr::Ident(Ident { sym, span, .. }) => Some((sym.to_string(), Some(*span))),
         _ => None,
     }
 }
@@ -881,23 +1194,21 @@ fn infer_type_from_expr(expr: &Expr) -> Option<TypeInfo> {
 
 fn infer_array_type(array: &ArrayLit) -> TypeInfo {
     let mut element: Option<TypeInfo> = None;
-    for elem in &array.elems {
-        if let Some(expr_or_spread) = elem {
-            if expr_or_spread.spread.is_some() {
-                return TypeInfo::Any;
-            }
-            if let Some(value) = infer_type_from_expr(&expr_or_spread.expr) {
-                element = match element {
-                    None => Some(value),
-                    Some(existing) => {
-                        if existing == value {
-                            Some(existing)
-                        } else {
-                            return TypeInfo::Any;
-                        }
+    for expr_or_spread in array.elems.iter().flatten() {
+        if expr_or_spread.spread.is_some() {
+            return TypeInfo::Any;
+        }
+        if let Some(value) = infer_type_from_expr(&expr_or_spread.expr) {
+            element = match element {
+                None => Some(value),
+                Some(existing) => {
+                    if existing == value {
+                        Some(existing)
+                    } else {
+                        return TypeInfo::Any;
                     }
-                };
-            }
+                }
+            };
         }
     }
     TypeInfo::Array(Box::new(element.unwrap_or(TypeInfo::Any)))

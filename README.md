@@ -6,10 +6,15 @@ A Language Server Protocol (LSP) implementation for the Manifold HTML framework,
 
 -   **Syntax Highlighting**: Proper color coding for Manifold directives and interpolations
 -   **Code Completion**: Intelligent completions for Manifold directives, HTML elements, and attributes
+-   **Scoped Suggestions**: Automatic completions for `${}` interpolations, Manifold attributes, and property access with a toggleable auto-trigger command (`Manifold: Toggle Auto Suggestions`)
 -   **Type Hints**: Type information for variables and expressions
 -   **Error Detection**: Real-time error reporting for invalid Manifold syntax
 -   **Go-to Definition**: Navigate to variable and function definitions
 -   **Hover Information**: Contextual information for Manifold elements
+
+## JetBrains IDE support
+
+A Gradle-based IntelliJ Platform plugin lives under `jetbrains/`. Use `./gradlew runIde` from that directory to launch a sandbox IDE, or `./gradlew buildPlugin` to produce an installable ZIP. The plugin looks for the `manifold-language-server` binary in `jetbrains/bin/<platform>/`, the Cargo `target` folders, `MANIFOLD_LSP_BIN`, or your `PATH`.
 
 ## Manifold Syntax Support
 

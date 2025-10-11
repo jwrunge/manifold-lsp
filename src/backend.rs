@@ -1,24 +1,26 @@
 use crate::expression::{parse_expression, ExpressionTokenKind};
 use dashmap::DashMap;
 use serde_json::Value;
+
 use tower_lsp::{
     async_trait,
     jsonrpc::Error,
     lsp_types::{
+        CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse,
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
         ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
         Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams,
-        InitializeResult, Location, MarkupContent, MarkupKind, MessageType,
-        Position as LspPosition, Range as LspRange, SemanticToken, SemanticTokenType,
-        SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-        SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-        ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-        TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+        InitializeResult, InlayHint, InlayHintParams, Location, MarkupContent, MarkupKind,
+        MessageType, Position as LspPosition, Range as LspRange, ReferenceParams, SemanticToken,
+        SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+        SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+        SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentContentChangeEvent,
+        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
     },
     Client, LanguageServer,
 };
 
-use super::attribute::ManifoldAttributeKind;
+use super::attribute::{ManifoldAttribute, ManifoldAttributeKind};
 use super::document::{DocumentSemanticToken, ManifoldDocument};
 use super::lineindex::LineIndex;
 use super::notification::{ManifoldNotification, NotificationParams};
@@ -38,6 +40,16 @@ fn semantic_token_kind_index(kind: ExpressionTokenKind) -> u32 {
         ExpressionTokenKind::Number => 2,
         ExpressionTokenKind::String => 3,
         ExpressionTokenKind::Operator => 4,
+    }
+}
+
+fn make_variable_completion(label: &str, detail: Option<String>) -> CompletionItem {
+    CompletionItem {
+        label: label.to_string(),
+        kind: Some(CompletionItemKind::VARIABLE),
+        detail,
+        sort_text: Some(format!("0{label}")),
+        ..Default::default()
     }
 }
 
@@ -172,6 +184,69 @@ impl Backend {
     }
 }
 
+fn property_identifier_at(
+    attribute: &ManifoldAttribute,
+    line_index: &LineIndex,
+    position: &LspPosition,
+) -> Option<String> {
+    let expr = attribute.expression.as_ref()?;
+    let (span_start, _) = attribute.expression_span?;
+    let offset = line_index.offset_at(position)?;
+    if offset < span_start || offset >= attribute.end_offset {
+        return None;
+    }
+
+    let rel_pos = offset.saturating_sub(span_start);
+    let bytes = expr.as_bytes();
+    let mut start = rel_pos.min(bytes.len());
+    while start > 0 {
+        let ch = bytes[start - 1] as char;
+        if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut end = rel_pos.min(bytes.len());
+    while end < bytes.len() {
+        let ch = bytes[end] as char;
+        if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+
+    if start >= end {
+        return None;
+    }
+
+    let token = &expr[start..end];
+    let ident = token.split('.').next().unwrap_or("");
+    if ident.is_empty() {
+        return None;
+    }
+
+    Some(ident.to_string())
+}
+
+fn position_within_range(position: &LspPosition, start: &LspPosition, end: &LspPosition) -> bool {
+    if position.line < start.line
+        || (position.line == start.line && position.character < start.character)
+    {
+        return false;
+    }
+
+    if position.line > end.line
+        || (position.line == end.line && position.character >= end.character)
+    {
+        return false;
+    }
+
+    true
+}
+
 #[async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult, Error> {
@@ -183,12 +258,13 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
+                references_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
                             work_done_progress_options: WorkDoneProgressOptions::default(),
                             legend: SemanticTokensLegend {
-                                token_types: SEMANTIC_TOKEN_TYPES.iter().cloned().collect(),
+                                token_types: SEMANTIC_TOKEN_TYPES.to_vec(),
                                 token_modifiers: Vec::new(),
                             },
                             range: None,
@@ -198,11 +274,10 @@ impl LanguageServer for Backend {
                 ),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![String::from("custom.notification")],
-                    ..Default::default()
+                    work_done_progress_options: Default::default(),
                 }),
                 ..ServerCapabilities::default()
             },
-            ..Default::default()
         })
     }
     async fn goto_definition(
@@ -215,19 +290,39 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        // Find attribute under cursor and token text
-        let maybe_attr = doc.parsed.manifold_attribute_at(&position);
-        let Some(attr) = maybe_attr else {
-            return Ok(None);
-        };
-        // Jump to state definition when clicking state name in data-mf-register
-        if attr.name.eq_ignore_ascii_case("data-mf-register") {
-            if let Some(expr) = &attr.expression {
+        if let Some(attr) = doc.parsed.manifold_attribute_at(&position) {
+            if attr.name.eq_ignore_ascii_case("data-mf-register") {
+                if let Some(expr) = &attr.expression {
+                    let html_path = uri.to_file_path().ok();
+                    let (state_idx, _unresolved) =
+                        crate::state::build_state_name_index(&doc.text, html_path.as_deref());
+                    let name = expr.trim().trim_matches('"').trim_matches('\'');
+                    if let Some(loc) = state_idx.get(name) {
+                        let range = LspRange::new(
+                            LspPosition::new(loc.line, loc.character),
+                            LspPosition::new(loc.line, loc.character + loc.length),
+                        );
+                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: loc.uri.clone(),
+                            range,
+                        })));
+                    }
+                }
+                return Ok(None);
+            }
+
+            let li = &doc.parsed.line_index;
+            if let Some(ident) = property_identifier_at(attr, li, &position) {
+                let state_name = attr
+                    .state_name
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
+
                 let html_path = uri.to_file_path().ok();
-                let (state_idx, _unresolved) =
-                    crate::state::build_state_name_index(&doc.text, html_path.as_deref());
-                let name = expr.trim().trim_matches('"').trim_matches('\'');
-                if let Some(loc) = state_idx.get(name) {
+                let (index, _unresolved) =
+                    crate::state::build_definition_index(&doc.text, html_path.as_deref());
+
+                if let Some(loc) = index.get(&(state_name.clone(), ident.clone())) {
                     let range = LspRange::new(
                         LspPosition::new(loc.line, loc.character),
                         LspPosition::new(loc.line, loc.character + loc.length),
@@ -238,80 +333,175 @@ impl LanguageServer for Backend {
                     })));
                 }
             }
-            return Ok(None);
         }
 
-        let (Some(expr), Some((span_start, _))) = (attr.expression.as_ref(), attr.expression_span)
-        else {
-            return Ok(None);
-        };
+        drop(doc);
 
-        // Determine identifier at position
-        let li = &doc.parsed.line_index;
-        let offset = match li.offset_at(&position) {
-            Some(o) => o,
-            None => return Ok(None),
-        };
-        if offset < span_start || offset >= attr.end_offset {
-            return Ok(None);
-        }
-        let _within = offset - span_start;
+        let mut cross_document_results: Vec<Location> = Vec::new();
+        for entry in self.documents.iter() {
+            let html_uri = entry.key();
+            let document = entry.value();
+            let html_path = html_uri.to_file_path().ok();
+            let (index, _unresolved) =
+                crate::state::build_definition_index(&document.text, html_path.as_deref());
 
-        // Determine token under cursor in the expression slice
-        let rel_pos = offset.saturating_sub(span_start);
-        let bytes = expr.as_bytes();
-        // Find boundaries of the current token (letters, digits, _, $ or .)
-        let mut start = rel_pos.min(bytes.len());
-        while start > 0 {
-            let ch = bytes[start - 1] as char;
-            if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' {
-                start -= 1;
-            } else {
-                break;
+            for ((state_name, prop_name), location) in index.iter() {
+                if location.uri != uri {
+                    continue;
+                }
+
+                let start = LspPosition::new(location.line, location.character);
+                let end = LspPosition::new(location.line, location.character + location.length);
+                if !position_within_range(&position, &start, &end) {
+                    continue;
+                }
+
+                for range in document.parsed.property_references(state_name, prop_name) {
+                    cross_document_results.push(Location {
+                        uri: html_uri.clone(),
+                        range,
+                    });
+                }
             }
         }
-        let mut end = rel_pos.min(bytes.len());
-        while end < bytes.len() {
-            let ch = bytes[end] as char;
-            if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' {
-                end += 1;
-            } else {
-                break;
-            }
-        }
-        let token = &expr[start..end];
-        if token.is_empty() {
-            return Ok(None);
-        }
-        // Take the leftmost identifier segment before any dot chain
-        let ident = token.split('.').next().unwrap_or("");
-        if ident.is_empty() {
-            return Ok(None);
-        }
 
-        // Resolve state name
-        let state_name = attr
-            .state_name
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-
-        // Build definition index from current document
-        let html_path = uri.to_file_path().ok();
-        let (index, _unresolved) =
-            crate::state::build_definition_index(&doc.text, html_path.as_deref());
-
-        if let Some(loc) = index.get(&(state_name.clone(), ident.to_string())) {
-            let range = LspRange::new(
-                LspPosition::new(loc.line, loc.character),
-                LspPosition::new(loc.line, loc.character + loc.length),
-            );
-            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                uri: loc.uri.clone(),
-                range,
-            })));
+        if !cross_document_results.is_empty() {
+            return Ok(Some(GotoDefinitionResponse::Array(cross_document_results)));
         }
 
         Ok(None)
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> Result<Option<CompletionResponse>, Error> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+
+        let Some(doc) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+
+        let Some(candidates) = doc.parsed.completion_candidates(&position) else {
+            return Ok(None);
+        };
+
+        let mut items: Vec<CompletionItem> = candidates
+            .iter()
+            .map(|candidate| make_variable_completion(&candidate.label, candidate.detail.clone()))
+            .collect();
+
+        if let Some(first) = items.first_mut() {
+            first.preselect = Some(true);
+            first.sort_text = Some(String::from("!0"));
+        }
+        for (idx, item) in items.iter_mut().enumerate().skip(1) {
+            item.sort_text = Some(format!("!{idx}{}", item.label));
+        }
+
+        let list = tower_lsp::lsp_types::CompletionList {
+            is_incomplete: false,
+            items,
+        };
+
+        Ok(Some(CompletionResponse::List(list)))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>, Error> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+
+        if let Some(doc) = self.documents.get(&uri) {
+            if let Some(attribute) = doc.parsed.manifold_attribute_at(&position) {
+                if attribute.name.eq_ignore_ascii_case("data-mf-register") {
+                    return Ok(Some(Vec::new()));
+                }
+
+                let mut results: Vec<Location> = Vec::new();
+                let li = &doc.parsed.line_index;
+                if let Some(identifier) = property_identifier_at(attribute, li, &position) {
+                    let state_name = attribute
+                        .state_name
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+
+                    for range in doc.parsed.property_references(&state_name, &identifier) {
+                        results.push(Location {
+                            uri: uri.clone(),
+                            range,
+                        });
+                    }
+
+                    if include_declaration {
+                        let html_path = uri.to_file_path().ok();
+                        let (index, _unresolved) =
+                            crate::state::build_definition_index(&doc.text, html_path.as_deref());
+                        if let Some(def) = index.get(&(state_name.clone(), identifier.clone())) {
+                            results.push(Location {
+                                uri: def.uri.clone(),
+                                range: LspRange::new(
+                                    LspPosition::new(def.line, def.character),
+                                    LspPosition::new(def.line, def.character + def.length),
+                                ),
+                            });
+                        }
+                    }
+                }
+
+                return Ok(Some(results));
+            }
+        }
+
+        let mut results: Vec<Location> = Vec::new();
+
+        for entry in self.documents.iter() {
+            let html_uri = entry.key().clone();
+            let doc = entry.value();
+            let html_path = html_uri.to_file_path().ok();
+            let (index, _unresolved) =
+                crate::state::build_definition_index(&doc.text, html_path.as_deref());
+
+            for ((state_name, prop_name), location) in index.iter() {
+                if location.uri != uri {
+                    continue;
+                }
+
+                let start = LspPosition::new(location.line, location.character);
+                let end = LspPosition::new(location.line, location.character + location.length);
+                if !position_within_range(&position, &start, &end) {
+                    continue;
+                }
+
+                for range in doc.parsed.property_references(state_name, prop_name) {
+                    results.push(Location {
+                        uri: html_uri.clone(),
+                        range,
+                    });
+                }
+
+                if include_declaration {
+                    results.push(Location {
+                        uri: location.uri.clone(),
+                        range: LspRange::new(start, end),
+                    });
+                }
+            }
+        }
+
+        Ok(Some(results))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>, Error> {
+        let uri = params.text_document.uri;
+        let range = params.range;
+        let Some(doc) = self.documents.get(&uri) else {
+            return Ok(Some(Vec::new()));
+        };
+
+        let hints = doc.parsed.inlay_hints(&range);
+        Ok(Some(hints))
     }
 
     async fn shutdown(&self) -> Result<(), Error> {
@@ -370,10 +560,7 @@ impl LanguageServer for Backend {
 
         if let Some(document) = self.documents.get(&uri) {
             if let Some(attribute) = document.parsed.manifold_attribute_at(&position).cloned() {
-                let range = match attribute.kind {
-                    ManifoldAttributeKind::Attribute => attribute.name_range.clone(),
-                    _ => attribute.range.clone(),
-                };
+                let range = attribute.range;
                 let intro_message = match attribute.kind {
                 ManifoldAttributeKind::Attribute => format!(
                     "`{}` is treated as a Manifold-specific attribute because its element is registered with `data-mf-register`.",
@@ -473,7 +660,7 @@ impl LanguageServer for Backend {
             self.client
                 .log_message(
                     MessageType::INFO,
-                    format!("Command executited successfully with params: {:?}", params),
+                    format!("Command executed successfully with params: {params:?}"),
                 )
                 .await;
 

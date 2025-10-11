@@ -1,8 +1,40 @@
 {
 	"name": "manifold-language-client",
-	"description": "VSCode client for Manifold Language Server",
+	"displayName": "Manifold Language Client",
+	"description": "Bring Manifold's reactive HTML authoring experience to VS Code with completions, diagnostics, and type insights.",
 	"license": "MIT",
-	"version": "0.0.1",
+	"version": "1.0.0",
+	"publisher": "manifold",
+	"author": {
+		"name": "Manifold Team"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/jwrunge/manifold-lsp"
+	},
+	"bugs": {
+		"url": "https://github.com/jwrunge/manifold-lsp/issues"
+	},
+	"homepage": "https://github.com/jwrunge/manifold-lsp",
+	"icon": "media/icon.png",
+	"galleryBanner": {
+		"color": "#121416",
+		"theme": "dark"
+	},
+	"categories": [
+		"Programming Languages",
+		"Linters"
+	],
+	"keywords": [
+		"manifold",
+		"html",
+		"lsp",
+		"language-server",
+		"templating"
+	],
+	"extensionKind": [
+		"workspace"
+	],
 	"engines": {
 		"vscode": "^1.85.0"
 	},
@@ -14,18 +46,12 @@
 	"contributes": {
 		"commands": [
 			{
-				"command": "manifoldLanguageServer.restart",
-				"title": "Manifold: Restart Language Server"
+				"command": "manifoldLanguageServer.toggleTypeHints",
+				"title": "Manifold: Toggle Type Annotations"
 			},
 			{
-				"command": "manifoldLanguageServer.showStateTree",
-				"title": "Manifold: Show Parsed State Tree"
-			}
-		],
-		"snippets": [
-			{
-				"language": "html",
-				"path": "./snippets/manifold.json"
+				"command": "manifoldLanguageServer.toggleCompletionAutoTrigger",
+				"title": "Manifold: Toggle Auto Suggestions"
 			}
 		],
 		"configuration": {
@@ -54,15 +80,11 @@
 						},
 						{
 							"scheme": "file",
-							"language": "manifold"
+							"language": "javascript"
 						},
 						{
 							"scheme": "file",
-							"language": "manifold-html"
-						},
-						{
-							"scheme": "untitled",
-							"language": "html"
+							"language": "typescript"
 						}
 					],
 					"items": {
@@ -81,6 +103,18 @@
 							}
 						}
 					}
+				},
+				"manifoldLanguageServer.typeHints.enabled": {
+					"scope": "window",
+					"type": "boolean",
+					"default": true,
+					"description": "Show inline type annotations for Manifold expressions exposed by the language server."
+				},
+				"manifoldLanguageServer.completions.autoTrigger": {
+					"scope": "window",
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically request Manifold-aware completions when typing '.', '${', or attribute quotes."
 				}
 			}
 		}
@@ -88,15 +122,17 @@
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
 		"compile": "tsc -p ./",
-		"watch": "tsc -watch -p ./"
+		"watch": "tsc -watch -p ./",
+		"package": "vsce package",
+		"publish": "vsce publish"
 	},
 	"dependencies": {
 		"vscode-languageclient": "9.0.1"
 	},
 	"devDependencies": {
 		"@types/node": "^17.0.18",
-		"vscode-test": "^1.3.0",
 		"@types/vscode": "1.85.0",
-		"typescript": "^4.9.4"
+		"typescript": "^4.9.4",
+		"vscode-test": "^1.3.0"
 	}
 }

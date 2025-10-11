@@ -8,9 +8,17 @@ import {
 	EventEmitter,
 	ExtensionContext,
 	window,
-	TextDocumentChangeEvent,
-	DocumentFilter,
+	languages,
+	InlayHint as VSInlayHint,
+	InlayHintKind as VSInlayHintKind,
+	CancellationToken,
 	commands,
+	ConfigurationTarget,
+	DocumentFilter,
+	DocumentSelector,
+	TextDocument,
+	Range,
+	CompletionTriggerKind,
 	StatusBarAlignment,
 	StatusBarItem,
 } from "vscode";
@@ -28,7 +36,7 @@ import {
 let client: LanguageClient;
 let statusItem: StatusBarItem | undefined;
 
-export async function activate(ctx: ExtensionContext) {
+export async function activate(context: ExtensionContext): Promise<void> {
 	const traceOutputChannel = window.createOutputChannel(
 		"Manifold Language Server trace"
 	);
@@ -64,98 +72,14 @@ export async function activate(ctx: ExtensionContext) {
 		serverOptions,
 		clientOptions
 	);
-
-	statusItem = window.createStatusBarItem(StatusBarAlignment.Left, 1);
-	statusItem.name = "Manifold Language Server";
-	statusItem.text = "$(sync~spin) Manifold LSP";
-	statusItem.tooltip = "Manifold language server status";
-	statusItem.command = "manifoldLanguageServer.showStateTree";
-	statusItem.show();
-
-	const restartCommand = commands.registerCommand(
-		"manifoldLanguageServer.restart",
-		async () => {
-			if (!client) {
-				return;
-			}
-			statusItem!.text = "$(sync~spin) Manifold LSP";
-			await client.stop();
-			await client.start();
-		}
-	);
-
-	const showStateTreeCommand = commands.registerCommand(
-		"manifoldLanguageServer.showStateTree",
-		async () => {
-			if (!client) {
-				return;
-			}
-			const editor = window.activeTextEditor;
-			if (!editor) {
-				window.showInformationMessage(
-					"Open a Manifold template to inspect its state tree."
-				);
-				return;
-			}
-
-			try {
-				const response = await client.sendRequest(
-					ExecuteCommandRequest.type,
-					{
-						command: "manifold.showState",
-						arguments: [editor.document.uri.toString()],
-					}
-				);
-
-				if (!response || !response.states) {
-					window.showWarningMessage(
-						"No Manifold state information is available for this document."
-					);
-					return;
-				}
-
-				traceOutputChannel.clear();
-				traceOutputChannel.appendLine("Manifold state tree:\n");
-				const states = response.states as Record<
-					string,
-					Record<string, string>
-				>;
-				for (const [stateName, props] of Object.entries(states)) {
-					traceOutputChannel.appendLine(`• ${stateName}`);
-					for (const [prop, ty] of Object.entries(props ?? {})) {
-						traceOutputChannel.appendLine(`   ↳ ${prop}: ${ty}`);
-					}
-					traceOutputChannel.appendLine("");
-				}
-				traceOutputChannel.show(true);
-			} catch (error) {
-				window.showErrorMessage(
-					`Unable to fetch Manifold state tree: ${String(error)}`
-				);
-			}
-		}
-	);
-
-	client.onDidChangeState((event) => {
-		switch (event.newState) {
-			case State.Starting:
-				statusItem!.text = "$(sync~spin) Manifold LSP";
-				break;
-			case State.Running:
-				statusItem!.text = "$(zap) Manifold LSP";
-				break;
-			case State.Stopped:
-				statusItem!.text = "$(error) Manifold LSP";
-				break;
-		}
-	});
-
 	await client.start();
-	statusItem!.text = "$(zap) Manifold LSP";
-
-	ctx.subscriptions.push(restartCommand);
-	ctx.subscriptions.push(showStateTreeCommand);
-	ctx.subscriptions.push(statusItem!);
+	context.subscriptions.push({
+		dispose: () => {
+			void client.stop();
+		},
+	});
+	activateInlayHints(context, client, selectors);
+	activateCompletions(context, client, selectors);
 }
 
 type SelectorConfig = {
@@ -239,40 +163,311 @@ export function deactivate(): Thenable<void> | undefined {
 	return client.stop();
 }
 
-export function activateInlayHints(ctx: ExtensionContext) {
-	const maybeUpdater = {
-		hintsProvider: null as Disposable | null,
-		updateHintsEventEmitter: new EventEmitter<void>(),
+export function activateInlayHints(
+	ctx: ExtensionContext,
+	languageClient: LanguageClient,
+	selectors: DocumentSelector
+): void {
+	const changeEmitter = new EventEmitter<void>();
+	ctx.subscriptions.push(changeEmitter);
 
-		async onConfigChange() {
-			this.dispose();
-		},
+	const provider = {
+		onDidChangeInlayHints: changeEmitter.event,
+		async provideInlayHints(
+			document: TextDocument,
+			range: Range,
+			token: CancellationToken
+		): Promise<VSInlayHint[]> {
+			if (!isTypeHintsEnabled()) {
+				return [];
+			}
 
-		onDidChangeTextDocument({
-			contentChanges,
-			document,
-		}: TextDocumentChangeEvent) {
-			// debugger
-			// this.updateHintsEventEmitter.fire();
-		},
+			if (token.isCancellationRequested) {
+				return [];
+			}
 
-		dispose() {
-			this.hintsProvider?.dispose();
-			this.hintsProvider = null;
-			this.updateHintsEventEmitter.dispose();
+			const params = {
+				textDocument:
+					languageClient.code2ProtocolConverter.asTextDocumentIdentifier(
+						document
+					),
+				range: languageClient.code2ProtocolConverter.asRange(range),
+			};
+
+			try {
+				const response = await languageClient.sendRequest(
+					"textDocument/inlayHint",
+					params
+				);
+				if (!Array.isArray(response)) {
+					return [];
+				}
+
+				return response
+					.map((hint) => convertInlayHint(languageClient, hint))
+					.filter((hint): hint is VSInlayHint => hint !== null);
+			} catch (error) {
+				console.error("Failed to fetch Manifold inlay hints", error);
+				return [];
+			}
 		},
 	};
 
-	workspace.onDidChangeConfiguration(
-		maybeUpdater.onConfigChange,
-		maybeUpdater,
-		ctx.subscriptions
-	);
-	workspace.onDidChangeTextDocument(
-		maybeUpdater.onDidChangeTextDocument,
-		maybeUpdater,
-		ctx.subscriptions
+	ctx.subscriptions.push(
+		languages.registerInlayHintsProvider(selectors, provider)
 	);
 
-	maybeUpdater.onConfigChange().catch(console.error);
+	ctx.subscriptions.push(
+		workspace.onDidChangeConfiguration((event) => {
+			if (
+				event.affectsConfiguration(
+					"manifoldLanguageServer.typeHints.enabled"
+				)
+			) {
+				changeEmitter.fire();
+			}
+		})
+	);
+
+	ctx.subscriptions.push(
+		commands.registerCommand(
+			"manifoldLanguageServer.toggleTypeHints",
+			async () => {
+				const config = workspace.getConfiguration(
+					"manifoldLanguageServer"
+				);
+				const enabled = config.get<boolean>("typeHints.enabled", true);
+				await config.update(
+					"typeHints.enabled",
+					!enabled,
+					ConfigurationTarget.Global
+				);
+				changeEmitter.fire();
+			}
+		)
+	);
+}
+
+function isTypeHintsEnabled(): boolean {
+	return workspace
+		.getConfiguration("manifoldLanguageServer")
+		.get<boolean>("typeHints.enabled", true);
+}
+
+export function activateCompletions(
+	ctx: ExtensionContext,
+	languageClient: LanguageClient,
+	selectors: DocumentSelector
+): void {
+	const triggerCharacters = [".", "{", '"'];
+	const statusBar = window.createStatusBarItem(
+		"manifoldAutoSuggestions",
+		StatusBarAlignment.Right,
+		100
+	);
+	statusBar.command = "manifoldLanguageServer.toggleCompletionAutoTrigger";
+	ctx.subscriptions.push(statusBar);
+
+	const updateStatusBar = () => {
+		if (isCompletionAutoTriggerEnabled()) {
+			statusBar.text = "Manifold Auto Suggs: On";
+			statusBar.tooltip =
+				"Click to disable auto-triggered Manifold completions (still available via Ctrl+Space).";
+		} else {
+			statusBar.text = "Manifold Auto Suggs: Off";
+			statusBar.tooltip =
+				"Click to re-enable auto-triggered Manifold completions.";
+		}
+		statusBar.show();
+	};
+
+	updateStatusBar();
+
+	ctx.subscriptions.push(
+		workspace.onDidChangeConfiguration((event) => {
+			if (
+				event.affectsConfiguration(
+					"manifoldLanguageServer.completions.autoTrigger"
+				)
+			) {
+				updateStatusBar();
+			}
+		})
+	);
+
+	ctx.subscriptions.push(
+		languages.registerCompletionItemProvider(
+			selectors,
+			{
+				async provideCompletionItems(
+					document,
+					position,
+					token,
+					context
+				) {
+					if (
+						context.triggerKind ===
+							CompletionTriggerKind.TriggerCharacter &&
+						!isCompletionAutoTriggerEnabled()
+					) {
+						return undefined;
+					}
+
+					if (
+						context.triggerKind ===
+							CompletionTriggerKind.TriggerCharacter &&
+						context.triggerCharacter === "{" &&
+						position.character >= 1
+					) {
+						const preceding = document.getText(
+							new Range(position.translate(0, -1), position)
+						);
+						if (preceding !== "$") {
+							return undefined;
+						}
+					}
+
+					if (
+						context.triggerKind ===
+							CompletionTriggerKind.TriggerCharacter &&
+						context.triggerCharacter === '"'
+					) {
+						const linePrefix = document.getText(
+							new Range(position.with(undefined, 0), position)
+						);
+						const attributeMatch = linePrefix.match(
+							/([\w:.$-]+)\s*=\s*(?:["'][^"']*)?$/
+						);
+						const attributeName = attributeMatch?.[1] ?? "";
+						if (
+							attributeName.length > 0 &&
+							!attributeName.startsWith(":") &&
+							!attributeName.startsWith("data-mf")
+						) {
+							return undefined;
+						}
+					}
+
+					try {
+						const params = {
+							textDocument:
+								languageClient.code2ProtocolConverter.asTextDocumentIdentifier(
+									document
+								),
+							position:
+								languageClient.code2ProtocolConverter.asPosition(
+									position
+								),
+						};
+
+						const response = (await languageClient.sendRequest(
+							"textDocument/completion",
+							params,
+							token
+						)) as unknown;
+						if (!response) {
+							return undefined;
+						}
+
+						return languageClient.protocol2CodeConverter.asCompletionResult(
+							response as any
+						);
+					} catch (error) {
+						console.error(
+							"Failed to fetch Manifold completions",
+							error
+						);
+						return undefined;
+					}
+				},
+			},
+			...triggerCharacters
+		)
+	);
+
+	ctx.subscriptions.push(
+		commands.registerCommand(
+			"manifoldLanguageServer.toggleCompletionAutoTrigger",
+			async () => {
+				const config = workspace.getConfiguration(
+					"manifoldLanguageServer"
+				);
+				const enabled = config.get<boolean>(
+					"completions.autoTrigger",
+					true
+				);
+				const next = !enabled;
+				await config.update(
+					"completions.autoTrigger",
+					next,
+					ConfigurationTarget.Global
+				);
+				updateStatusBar();
+				void window.showInformationMessage(
+					next
+						? "Manifold auto suggestions enabled."
+						: "Manifold auto suggestions disabled; use Ctrl+Space to request completions."
+				);
+			}
+		)
+	);
+}
+
+function isCompletionAutoTriggerEnabled(): boolean {
+	return workspace
+		.getConfiguration("manifoldLanguageServer")
+		.get<boolean>("completions.autoTrigger", true);
+}
+
+function convertInlayHint(
+	languageClient: LanguageClient,
+	hint: unknown
+): VSInlayHint | null {
+	if (!hint || typeof hint !== "object") {
+		return null;
+	}
+
+	const rawHint = hint as {
+		position?: unknown;
+		label?: unknown;
+		kind?: number;
+		paddingLeft?: boolean;
+		paddingRight?: boolean;
+	};
+
+	if (!rawHint.position) {
+		return null;
+	}
+
+	const position = languageClient.protocol2CodeConverter.asPosition(
+		rawHint.position as any
+	);
+
+	let labelText = "";
+	if (typeof rawHint.label === "string") {
+		labelText = rawHint.label;
+	} else if (Array.isArray(rawHint.label)) {
+		labelText = rawHint.label
+			.map((part: any) =>
+				typeof part?.value === "string" ? part.value : ""
+			)
+			.join("");
+	} else {
+		return null;
+	}
+
+	const vsHint = new VSInlayHint(position, labelText);
+	if (rawHint.kind === 1) {
+		vsHint.kind = VSInlayHintKind.Type;
+	} else if (rawHint.kind === 2) {
+		vsHint.kind = VSInlayHintKind.Parameter;
+	}
+	if (typeof rawHint.paddingLeft === "boolean") {
+		vsHint.paddingLeft = rawHint.paddingLeft;
+	}
+	if (typeof rawHint.paddingRight === "boolean") {
+		vsHint.paddingRight = rawHint.paddingRight;
+	}
+
+	return vsHint;
 }

@@ -1,4 +1,6 @@
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use tower_lsp::lsp_types::{
+    Diagnostic, DiagnosticSeverity, InlayHint, InlayHintKind, InlayHintLabel, Position, Range,
+};
 
 use super::attribute::{ManifoldAttribute, ManifoldAttributeKind, ParsedAttribute};
 use super::expression::{
@@ -6,7 +8,7 @@ use super::expression::{
     ValidationContext,
 };
 use super::lineindex::LineIndex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::state::{
     parse_states_from_document, resolve_identifier_type, LoopBinding, ManifoldStates,
@@ -28,6 +30,12 @@ pub struct DocumentSemanticToken {
     pub start_char: u32,
     pub length: u32,
     pub kind: ExpressionTokenKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionCandidate {
+    pub label: String,
+    pub detail: Option<String>,
 }
 
 impl ManifoldDocument {
@@ -71,7 +79,48 @@ impl ManifoldDocument {
         let offset = self.line_index.offset_at(position)?;
         self.attributes
             .iter()
-            .find(|attr| offset >= attr.start_offset && offset < attr.end_offset)
+            .find(|attr| offset >= attr.start_offset && offset <= attr.end_offset)
+    }
+
+    pub fn completion_candidates(&self, position: &Position) -> Option<Vec<CompletionCandidate>> {
+        let attribute = self.manifold_attribute_at(position)?;
+        let offset = self.line_index.offset_at(position)?;
+
+        if !attribute_contains_offset(attribute, offset) {
+            return None;
+        }
+
+        let mut seen = HashSet::new();
+        let mut candidates: Vec<CompletionCandidate> = Vec::new();
+
+        let state_name = attribute.state_name.as_deref().unwrap_or("default");
+
+        if let Some(state) = self.states.get(state_name) {
+            for (name, ty) in state.properties.iter() {
+                if seen.insert(name.clone()) {
+                    candidates.push(CompletionCandidate {
+                        label: name.clone(),
+                        detail: Some(ty.describe()),
+                    });
+                }
+            }
+        }
+
+        for local in &attribute.locals {
+            if seen.insert(local.name.clone()) {
+                candidates.push(CompletionCandidate {
+                    label: local.name.clone(),
+                    detail: Some(local.ty.describe()),
+                });
+            }
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        candidates.sort_by(|a, b| a.label.cmp(&b.label));
+        Some(candidates)
     }
 
     pub fn semantic_tokens(&self) -> Vec<DocumentSemanticToken> {
@@ -120,6 +169,109 @@ impl ManifoldDocument {
         results
     }
 
+    pub fn inlay_hints(&self, range: &Range) -> Vec<InlayHint> {
+        let range_start = self.line_index.offset_at(&range.start).unwrap_or(0);
+        let range_end = self
+            .line_index
+            .offset_at(&range.end)
+            .unwrap_or(self.text.len());
+
+        let mut hints = Vec::new();
+        let mut seen = HashSet::new();
+
+        for attribute in &self.attributes {
+            let Some((span_start, span_end)) = attribute.expression_span else {
+                continue;
+            };
+
+            if span_end < range_start || span_start > range_end {
+                continue;
+            }
+
+            if let Some(type_info) = self.expression_type(attribute) {
+                let label_text = format!(": {}", type_info.describe());
+                let position = self.line_index.position_at(span_end);
+
+                if !seen.insert((position.line, position.character, label_text.clone())) {
+                    continue;
+                }
+
+                let label: InlayHintLabel = label_text.into();
+                hints.push(InlayHint {
+                    position,
+                    label,
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: Some(true),
+                    padding_right: None,
+                    data: None,
+                });
+            }
+        }
+
+        hints
+    }
+
+    pub fn property_references(&self, state_name: &str, property: &str) -> Vec<Range> {
+        let mut ranges = Vec::new();
+
+        for attribute in &self.attributes {
+            let attr_state = attribute.state_name.as_deref().unwrap_or("default");
+            if attr_state != state_name {
+                continue;
+            }
+
+            let (Some(expr), Some((span_start, _span_end))) =
+                (attribute.expression.as_ref(), attribute.expression_span)
+            else {
+                continue;
+            };
+
+            let expr_bytes = expr.as_bytes();
+            let mut cursor = 0;
+            while cursor <= expr.len().saturating_sub(property.len()) {
+                let remaining = &expr[cursor..];
+                let Some(rel_index) = remaining.find(property) else {
+                    break;
+                };
+
+                let start = cursor + rel_index;
+                let end = start + property.len();
+
+                let prev_ok = if start == 0 {
+                    true
+                } else {
+                    let ch = expr_bytes[start - 1];
+                    !Self::is_identifier_char(ch)
+                };
+
+                let next_ok = if end >= expr.len() {
+                    true
+                } else {
+                    let ch = expr_bytes[end];
+                    !Self::is_identifier_char(ch)
+                };
+
+                if prev_ok && next_ok {
+                    let absolute_start = span_start + start;
+                    let absolute_end = span_start + end;
+                    ranges.push(Range::new(
+                        self.line_index.position_at(absolute_start),
+                        self.line_index.position_at(absolute_end),
+                    ));
+                }
+
+                cursor = start + 1;
+            }
+        }
+
+        ranges
+    }
+
+    fn is_identifier_char(ch: u8) -> bool {
+        ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'$'
+    }
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 
@@ -141,8 +293,8 @@ impl ManifoldDocument {
             };
 
             // Skip variable reference validation for :each expressions since they have special syntax
-            let skip_variable_validation = attribute.name.to_ascii_lowercase() == ":each"
-                || attribute.name.to_ascii_lowercase() == "data-mf-each";
+            let skip_variable_validation = attribute.name.eq_ignore_ascii_case(":each")
+                || attribute.name.eq_ignore_ascii_case("data-mf-each");
 
             if let Err(message) = validate_expression_with_context(
                 expr,
@@ -253,11 +405,7 @@ impl ManifoldDocument {
             return Some(TypeInfo::Boolean);
         }
 
-        if let Some(first_ident) = tokens
-            .iter()
-            .find(|token| token.kind == ExpressionTokenKind::Identifier)
-        {
-            let identifier = expr[first_ident.start..first_ident.end].to_string();
+        if let Some(identifier) = extract_identifier_chain(expr, &tokens) {
             if let Some(ty) = resolve_identifier_type(&identifier, state, &locals_map) {
                 return Some(ty);
             }
@@ -265,6 +413,161 @@ impl ManifoldDocument {
 
         None
     }
+}
+
+fn attribute_contains_offset(attribute: &ManifoldAttribute, offset: usize) -> bool {
+    if let Some((start, end)) = attribute.expression_span {
+        if offset >= start && offset <= end {
+            return true;
+        }
+    }
+
+    if let Some((start, end)) = attribute.value_range {
+        if offset >= start && offset <= end {
+            return true;
+        }
+    }
+
+    offset >= attribute.start_offset && offset <= attribute.end_offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower_lsp::lsp_types::{Position, Range};
+
+    const SAMPLE_HTML: &str = r#"
+        <div data-mf-register>
+            <button :onclick="count++">Increment</button>
+            <button :if="count > 5">${count}</button>
+            <ul>
+                <li :each="items as item, index">
+                    Item: ${item} @ ${index} / ${count}
+                </li>
+            </ul>
+        </div>
+        <script type="module">
+            const state = Manifold.create()
+                .add("count", 0)
+                .add("items", ["A", "B"])
+                .add("status", "idle")
+                .build();
+        </script>
+    "#;
+
+    fn position_in(doc: &ManifoldDocument, needle: &str, relative: usize) -> Position {
+        let start = doc
+            .text
+            .find(needle)
+            .unwrap_or_else(|| panic!("needle '{needle}' not found"));
+        doc.line_index.position_at(start + relative)
+    }
+
+    #[test]
+    fn completions_include_state_properties_inside_attribute() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let position = position_in(&document, "count++", 1);
+
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected attribute completions");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"count".to_string()));
+        assert!(labels.contains(&"items".to_string()));
+        assert!(labels.contains(&"status".to_string()));
+    }
+
+    #[test]
+    fn completions_include_loop_locals_in_text_expression() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let position = position_in(&document, "${item}", 3);
+
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected text expression completions");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"item".to_string()));
+        assert!(labels.contains(&"index".to_string()));
+        assert!(labels.contains(&"count".to_string()));
+    }
+
+    #[test]
+    fn attribute_completion_available_when_value_is_empty() {
+        let html = r#"
+            <div data-mf-register>
+                <button :if=""></button>
+            </div>
+            <script type="module">
+                const state = Manifold.create().add("count", 0).build();
+            </script>
+        "#;
+        let document = ManifoldDocument::parse(html);
+        let position = position_in(&document, ":if=\"\"", 5);
+
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected completions for empty attribute value");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"count".to_string()));
+    }
+
+    #[test]
+    fn property_references_include_loop_and_text_usages() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let references = document.property_references("default", "count");
+        assert!(references.len() >= 3);
+    }
+
+    #[test]
+    fn inlay_hints_present_for_registered_attributes() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let end = document.line_index.position_at(document.text.len());
+        let hints = document.inlay_hints(&Range::new(Position::new(0, 0), end));
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn manifold_attribute_lookup_is_inclusive() {
+        let document = ManifoldDocument::parse(SAMPLE_HTML);
+        let end_position = position_in(&document, "count > 5\"", 0);
+        let attribute = document
+            .manifold_attribute_at(&end_position)
+            .expect("should detect attribute at closing quote");
+        assert_eq!(attribute.name, ":if".to_string());
+    }
+}
+
+fn extract_identifier_chain(expr: &str, tokens: &[ExpressionToken]) -> Option<String> {
+    let first_index = tokens
+        .iter()
+        .position(|token| token.kind == ExpressionTokenKind::Identifier)?;
+
+    let first = &tokens[first_index];
+    let mut chain = expr[first.start..first.end].to_string();
+    let mut index = first_index + 1;
+
+    while index + 1 < tokens.len() {
+        let operator = &tokens[index];
+        if operator.kind != ExpressionTokenKind::Operator {
+            break;
+        }
+
+        let operator_text = expr[operator.start..operator.end].trim();
+        if operator_text != "." {
+            break;
+        }
+
+        let next = &tokens[index + 1];
+        if next.kind != ExpressionTokenKind::Identifier {
+            break;
+        }
+
+        chain.push('.');
+        chain.push_str(expr[next.start..next.end].trim());
+        index += 2;
+    }
+
+    Some(chain)
 }
 
 struct TagScanner<'a> {
@@ -524,8 +827,14 @@ impl<'a> TagScanner<'a> {
                     Some((value_start, value_end)) if value_end > value_start => {
                         let raw = &self.text[value_start..value_end];
                         let trimmed = raw.trim();
+
                         if trimmed.is_empty() {
-                            (value_start, value_end, None, None)
+                            (
+                                value_start,
+                                value_end,
+                                None,
+                                Some((value_start, value_start)),
+                            )
                         } else {
                             let rel_start = raw
                                 .find(trimmed)
@@ -540,6 +849,12 @@ impl<'a> TagScanner<'a> {
                             )
                         }
                     }
+                    Some((value_start, value_end)) => (
+                        value_start,
+                        value_end,
+                        None,
+                        Some((value_start, value_start)),
+                    ),
                     _ => (attr.span_start, attr.span_end, None, None),
                 };
 
@@ -583,6 +898,7 @@ impl<'a> TagScanner<'a> {
                     range,
                     start_offset: start,
                     end_offset: end,
+                    value_range: attr.value_range,
                     kind: ManifoldAttributeKind::Attribute,
                     expression,
                     expression_span,
@@ -658,12 +974,14 @@ impl<'a> TagScanner<'a> {
             let expr_start = search_idx + rel;
             let mut cursor = expr_start + 2;
             let mut brace_depth = 0i32;
+            let mut found_closing = false;
             while cursor < end {
                 match self.bytes[cursor] {
                     b'{' => brace_depth += 1,
                     b'}' => {
                         if brace_depth == 0 {
                             cursor += 1;
+                            found_closing = true;
                             break;
                         } else {
                             brace_depth -= 1;
@@ -673,8 +991,8 @@ impl<'a> TagScanner<'a> {
                 }
                 cursor += 1;
             }
-            if cursor > end {
-                break;
+            if !found_closing {
+                cursor = end;
             }
             let expr_end = cursor;
             let range = Range::new(
@@ -682,26 +1000,29 @@ impl<'a> TagScanner<'a> {
                 self.line_index.position_at(expr_end),
             );
             let name = self.text[expr_start..expr_end].to_string();
-            let expression = if expr_end > expr_start + 3 {
-                let raw = &self.text[expr_start + 2..expr_end - 1];
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
+            let raw_slice = if found_closing {
+                &self.text[expr_start + 2..expr_end - 1]
             } else {
-                None
+                &self.text[expr_start + 2..expr_end]
             };
-            let expression_span = expression.as_ref().map(|trimmed| {
-                let raw = &self.text[expr_start + 2..expr_end - 1];
-                let rel_start = raw
-                    .find(trimmed)
+            let trimmed = raw_slice.trim();
+            let expression = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+            let expression_span = if let Some(expr_text) = expression.as_ref() {
+                let rel_start = raw_slice
+                    .find(expr_text)
                     .map(|offset| expr_start + 2 + offset)
                     .unwrap_or(expr_start + 2);
-                let rel_end = rel_start + trimmed.len();
-                (rel_start, rel_end)
-            });
+                let rel_end = rel_start + expr_text.len();
+                Some((rel_start, rel_end))
+            } else if found_closing {
+                Some((expr_start + 2, expr_end.saturating_sub(1)))
+            } else {
+                Some((expr_start + 2, expr_end))
+            };
             let locals_snapshot = state
                 .locals
                 .iter()
@@ -716,6 +1037,7 @@ impl<'a> TagScanner<'a> {
                 range,
                 start_offset: expr_start,
                 end_offset: expr_end,
+                value_range: Some((expr_start + 2, expr_end)),
                 kind: ManifoldAttributeKind::TextExpression,
                 expression,
                 expression_span,

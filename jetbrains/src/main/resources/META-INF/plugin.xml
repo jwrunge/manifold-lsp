@@ -1,0 +1,16 @@
+<idea-plugin>
+    <id>com.manifold.intellij</id>
+    <name>Manifold Language Tools</name>
+    <vendor email="support@manifold.dev" url="https://github.com/manifold-systems">Manifold Systems</vendor>
+    <description><![CDATA[
+        <p>JetBrains IDE integration for the Manifold language server.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.platform.lsp</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+    <notificationGroup id="Manifold LSP" displayType="BALLOON" isLogByDefault="false"/>
+        <lsp.serverSupportProvider implementation="com.manifold.jetbrains.ManifoldLspServerSupportProvider"/>
+    </extensions>
+</idea-plugin>
