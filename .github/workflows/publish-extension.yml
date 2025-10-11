@@ -98,7 +98,7 @@ jobs:
                     exit 0
                   fi
                   PACKAGE=$(ls client/*.vsix | tail -n 1)
-                  pnpm --dir client exec vsce publish --pat "$VSCE_TOKEN" --packagePath "$PACKAGE"
+                  pnpm --dir client exec vsce publish --pat "$VSCE_TOKEN" --packagePath "$(realpath "$PACKAGE")"
 
             - name: Upload VSIX artifact
               uses: actions/upload-artifact@v4
