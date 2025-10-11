@@ -39,14 +39,6 @@
 		"vscode": "^1.85.0"
 	},
 	"main": "./out/extension.js",
-	"files": [
-		"out/**/*",
-		"media/**/*",
-		"snippets/**/*",
-		"README.md",
-		"package.json",
-		"LICENSE"
-	],
 	"activationEvents": [
 		"onLanguage:html",
 		"onStartupFinished"
