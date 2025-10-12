@@ -12,7 +12,7 @@ Level up your Manifold HTML authoring with completions, diagnostics, inline type
 
 ### Getting Started
 
-1. Install the Manifold Language Client from the VS Code Marketplace (or sideload the `.vsix` package while testing).
+1. Install the Manifold Language Client from the VS Code Marketplace.
 2. Open a project containing Manifold HTML templates.
 3. The extension activates automatically for HTML/JavaScript/TypeScript files. Toggle auto-completions or inline hints via the command palette (`⌘⇧P` / `Ctrl+Shift+P`).
 
@@ -22,6 +22,7 @@ Level up your Manifold HTML authoring with completions, diagnostics, inline type
 | ----------------------------------- | -------------------------------------------------------------------------- |
 | `Manifold: Toggle Auto Suggestions` | Enable or disable automatic completions when typing attribute expressions. |
 | `Manifold: Toggle Type Annotations` | Show or hide inline type hints for expressions.                            |
+| `Manifold: Restart Language Server` | Manually restart the bundled Manifold language server process.             |
 
 ### Configuration
 
@@ -33,23 +34,3 @@ Level up your Manifold HTML authoring with completions, diagnostics, inline type
 | `manifoldLanguageServer.typeHints.enabled`       | `true`                             | Show inline type annotations when available.                             |
 | `manifoldLanguageServer.trace.server`            | `off`                              | Enables verbose logging between VS Code and the LSP for troubleshooting. |
 | `manifoldLanguageServer.documentSelectors`       | `html`, `javascript`, `typescript` | Customize which language IDs should activate the server.                 |
-
-### Development
-
-```bash
-pnpm install
-pnpm run compile
-pnpm run watch # in a separate terminal while developing
-```
-
-Launch the `Launch Client` debug configuration inside VS Code to start a second Extension Host window for manual testing.
-
-### Packaging & Publishing
-
-```bash
-pnpm run compile
-pnpm run package   # produces manifold-language-client-<version>.vsix
-pnpm run publish   # requires VSCE personal access token
-```
-
-Remember to update `CHANGELOG.md` and bump the version before tagging a release.

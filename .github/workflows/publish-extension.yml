@@ -134,6 +134,14 @@ jobs:
             - name: Package VS Code extension
               run: pnpm package
 
+            - name: Verify VSIX bundles server binaries
+              run: |
+                  set -euo pipefail
+                  PACKAGE=$(ls client/*.vsix | tail -n 1)
+                  unzip -l "$PACKAGE" "extension/bin/linux/manifold-language-server" >/dev/null
+                  unzip -l "$PACKAGE" "extension/bin/darwin/manifold-language-server" >/dev/null
+                  unzip -l "$PACKAGE" "extension/bin/win32/manifold-language-server.exe" >/dev/null
+
             - name: Publish to VS Code Marketplace
               if: ${{ github.event_name == 'release' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true') }}
               run: |

@@ -41,6 +41,7 @@ import which from "which";
 
 let client: LanguageClient;
 let statusItem: StatusBarItem | undefined;
+let traceOutputChannel: OutputChannel | undefined;
 
 const MISSING_SERVER_DOCS = Uri.parse(
 	"https://github.com/jwrunge/manifold-lsp#installation"
@@ -107,6 +108,7 @@ function registerMissingServerCommands(
 	const commandIds = [
 		"manifoldLanguageServer.toggleTypeHints",
 		"manifoldLanguageServer.toggleCompletionAutoTrigger",
+		"manifoldLanguageServer.restart",
 	];
 
 	for (const commandId of commandIds) {
@@ -169,10 +171,11 @@ function isExecutable(filePath: string): boolean {
 }
 
 export async function activate(context: ExtensionContext): Promise<void> {
-	const traceOutputChannel = window.createOutputChannel(
+	traceOutputChannel = window.createOutputChannel(
 		"Manifold Language Server trace"
 	);
-	const command = resolveServerCommand(context, traceOutputChannel);
+	const channel = traceOutputChannel;
+	const command = resolveServerCommand(context, channel);
 	if (!command) {
 		handleMissingServerBinary(context);
 		return;
@@ -199,7 +202,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
 	const clientOptions: LanguageClientOptions = {
 		documentSelector:
 			selectors as LanguageClientOptions["documentSelector"],
-		traceOutputChannel,
+		traceOutputChannel: channel,
 	};
 
 	client = new LanguageClient(
@@ -211,10 +214,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
 	try {
 		await client.start();
 	} catch (error) {
-		traceOutputChannel.appendLine(
+		channel.appendLine(
 			`Failed to start Manifold language server with command: ${command}`
 		);
-		traceOutputChannel.appendLine(String(error));
+		channel.appendLine(String(error));
 		void window.showErrorMessage(
 			"Manifold language server failed to launch. Check the output channel for details."
 		);
@@ -227,6 +230,39 @@ export async function activate(context: ExtensionContext): Promise<void> {
 	});
 	activateInlayHints(context, client, selectors);
 	activateCompletions(context, client, selectors);
+	registerRestartCommand(context);
+}
+
+function registerRestartCommand(context: ExtensionContext): void {
+	const commandId = "manifoldLanguageServer.restart";
+	context.subscriptions.push(
+		commands.registerCommand(commandId, async () => {
+			if (!client) {
+				void window.showWarningMessage(
+					"Manifold language server is not currently running."
+				);
+				return;
+			}
+			try {
+				await client.restart();
+				traceOutputChannel?.appendLine(
+					"Language server restarted via command palette."
+				);
+				void window.showInformationMessage(
+					"Manifold language server restarted."
+				);
+			} catch (error) {
+				traceOutputChannel?.appendLine(
+					`Failed to restart Manifold language server: ${String(
+						error
+					)}`
+				);
+				void window.showErrorMessage(
+					"Failed to restart the Manifold language server. Check the output channel for details."
+				);
+			}
+		})
+	);
 }
 
 type SelectorConfig = {
