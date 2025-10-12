@@ -55,15 +55,15 @@ jobs:
               run: |
                   python3 scripts/check_version_bump.py --before "${BEFORE_SHA}" --output "$GITHUB_OUTPUT"
 
-  build:
-    needs:
-      - detect-version
-      - build-server-binaries
-    if: needs.detect-version.outputs.bumped == 'true'
-    runs-on: ubuntu-latest
-    env:
-      CARGO_TERM_COLOR: always
-    steps:
+    build:
+        needs:
+            - detect-version
+            - build-server-binaries
+        if: needs.detect-version.outputs.bumped == 'true'
+        runs-on: ubuntu-latest
+        env:
+            CARGO_TERM_COLOR: always
+        steps:
             - name: Checkout repository
               uses: actions/checkout@v4
             - name: Set up Rust
