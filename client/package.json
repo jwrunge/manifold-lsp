@@ -41,6 +41,10 @@
 	"main": "./out/extension.js",
 	"activationEvents": [
 		"onLanguage:html",
+		"onLanguage:manifold",
+		"onLanguage:manifold-html",
+		"onLanguage:javascript",
+		"onLanguage:typescript",
 		"onStartupFinished"
 	],
 	"contributes": {

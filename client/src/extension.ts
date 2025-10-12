@@ -171,15 +171,20 @@ function isExecutable(filePath: string): boolean {
 }
 
 export async function activate(context: ExtensionContext): Promise<void> {
+	console.log("[Manifold] activate() called");
 	traceOutputChannel = window.createOutputChannel(
 		"Manifold Language Server trace"
 	);
 	const channel = traceOutputChannel;
+	channel.appendLine("Activating Manifold language client...");
 	const command = resolveServerCommand(context, channel);
 	if (!command) {
+		console.warn("[Manifold] No server command resolved; prompting user");
+		channel.show(true);
 		handleMissingServerBinary(context);
 		return;
 	}
+	channel.appendLine(`Resolved language server command: ${command}`);
 	const configuration = workspace.getConfiguration("manifoldLanguageServer");
 	const traceSetting = configuration.get<string>("trace.server", "off");
 	const rustLogLevel = mapTraceToRustLog(traceSetting);
@@ -211,9 +216,12 @@ export async function activate(context: ExtensionContext): Promise<void> {
 		serverOptions,
 		clientOptions
 	);
+	registerRestartCommand(context);
 	try {
 		await client.start();
+		channel.appendLine("Manifold language server started successfully.");
 	} catch (error) {
+		console.error("[Manifold] Failed to start language server", error);
 		channel.appendLine(
 			`Failed to start Manifold language server with command: ${command}`
 		);
@@ -221,7 +229,8 @@ export async function activate(context: ExtensionContext): Promise<void> {
 		void window.showErrorMessage(
 			"Manifold language server failed to launch. Check the output channel for details."
 		);
-		throw error;
+		channel.show(true);
+		return;
 	}
 	context.subscriptions.push({
 		dispose: () => {
@@ -230,7 +239,6 @@ export async function activate(context: ExtensionContext): Promise<void> {
 	});
 	activateInlayHints(context, client, selectors);
 	activateCompletions(context, client, selectors);
-	registerRestartCommand(context);
 }
 
 function registerRestartCommand(context: ExtensionContext): void {
