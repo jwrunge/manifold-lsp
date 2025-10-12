@@ -127,7 +127,8 @@
 		"publish": "vsce publish"
 	},
 	"dependencies": {
-		"vscode-languageclient": "9.0.1"
+		"vscode-languageclient": "9.0.1",
+		"which": "^5.0.0"
 	},
 	"devDependencies": {
 		"@types/node": "^17.0.18",

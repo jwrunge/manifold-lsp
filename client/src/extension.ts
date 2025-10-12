@@ -21,6 +21,9 @@ import {
 	CompletionTriggerKind,
 	StatusBarAlignment,
 	StatusBarItem,
+	Uri,
+	env,
+	OutputChannel,
 } from "vscode";
 
 import {
@@ -32,15 +35,148 @@ import {
 	ExecuteCommandRequest,
 	State,
 } from "vscode-languageclient/node";
+import { accessSync, constants } from "fs";
+import * as path from "path";
+import which from "which";
 
 let client: LanguageClient;
 let statusItem: StatusBarItem | undefined;
+
+const MISSING_SERVER_DOCS = Uri.parse(
+	"https://github.com/jwrunge/manifold-lsp#installation"
+);
+
+function resolveServerCommand(
+	context: ExtensionContext,
+	outputChannel: OutputChannel
+): string | undefined {
+	const override = process.env.SERVER_PATH;
+	if (override) {
+		if (isExecutable(override)) {
+			outputChannel.appendLine(
+				`Using language server from SERVER_PATH: ${override}`
+			);
+			return override;
+		}
+		outputChannel.appendLine(
+			`SERVER_PATH is set to "${override}" but the file is not executable or does not exist.`
+		);
+	}
+
+	const bundled = getBundledBinary(context, outputChannel);
+	if (bundled) {
+		outputChannel.appendLine(
+			`Using bundled language server binary at ${bundled}`
+		);
+		return bundled;
+	}
+
+	try {
+		const resolved = which.sync("manifold-language-server");
+		outputChannel.appendLine(
+			`Using language server found on PATH: ${resolved}`
+		);
+		return resolved;
+	} catch (error) {
+		outputChannel.appendLine(
+			"manifold-language-server was not found on PATH."
+		);
+		if (error instanceof Error) {
+			outputChannel.appendLine(error.message);
+		}
+		return undefined;
+	}
+}
+
+function handleMissingServerBinary(context: ExtensionContext): void {
+	const message =
+		"Manifold language server executable not found. Install the CLI or set SERVER_PATH.";
+	const learnMore = "Open setup guide";
+	void window.showErrorMessage(message, learnMore).then((selection) => {
+		if (selection === learnMore) {
+			void env.openExternal(MISSING_SERVER_DOCS);
+		}
+	});
+	registerMissingServerCommands(context, message);
+}
+
+function registerMissingServerCommands(
+	ctx: ExtensionContext,
+	message: string
+): void {
+	const commandIds = [
+		"manifoldLanguageServer.toggleTypeHints",
+		"manifoldLanguageServer.toggleCompletionAutoTrigger",
+	];
+
+	for (const commandId of commandIds) {
+		ctx.subscriptions.push(
+			commands.registerCommand(commandId, () => {
+				const learnMore = "Open setup guide";
+				void window
+					.showErrorMessage(message, learnMore)
+					.then((selection) => {
+						if (selection === learnMore) {
+							void env.openExternal(MISSING_SERVER_DOCS);
+						}
+					});
+			})
+		);
+	}
+}
+
+function getBundledBinary(
+	context: ExtensionContext,
+	outputChannel: OutputChannel
+): string | undefined {
+	const platform = process.platform;
+	const binaryName =
+		platform === "win32"
+			? "manifold-language-server.exe"
+			: "manifold-language-server";
+	const candidates = [
+		context.asAbsolutePath(path.join("bin", platform, binaryName)),
+		context.asAbsolutePath(path.join("bin", binaryName)),
+	];
+
+	for (const candidate of candidates) {
+		if (isExecutable(candidate)) {
+			return candidate;
+		}
+	}
+
+	if (candidates.length > 0) {
+		outputChannel.appendLine(
+			"No bundled Manifold language server binary was found in the extension package."
+		);
+	}
+
+	return undefined;
+}
+
+function isExecutable(filePath: string): boolean {
+	try {
+		accessSync(filePath, constants.X_OK);
+		return true;
+	} catch {
+		try {
+			accessSync(filePath, constants.F_OK);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+}
 
 export async function activate(context: ExtensionContext): Promise<void> {
 	const traceOutputChannel = window.createOutputChannel(
 		"Manifold Language Server trace"
 	);
-	const command = process.env.SERVER_PATH || "manifold-language-server";
+	const command = resolveServerCommand(context, traceOutputChannel);
+	if (!command) {
+		handleMissingServerBinary(context);
+		return;
+	}
 	const configuration = workspace.getConfiguration("manifoldLanguageServer");
 	const traceSetting = configuration.get<string>("trace.server", "off");
 	const rustLogLevel = mapTraceToRustLog(traceSetting);
