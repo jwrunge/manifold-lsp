@@ -1,5 +1,5 @@
 <idea-plugin>
-    <id>com.manifold.intellij</id>
+    <id>com.manifold.jetbrains.lsp</id>
     <name>Manifold Language Tools</name>
     <vendor email="support@manifold.dev" url="https://github.com/manifold-systems">Manifold Systems</vendor>
     <description><![CDATA[
