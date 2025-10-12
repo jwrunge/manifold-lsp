@@ -128,11 +128,11 @@
 		}
 	},
 	"scripts": {
-		"vscode:prepublish": "npm run compile",
-		"compile": "tsc -p ./",
-		"watch": "tsc -watch -p ./",
-		"package": "vsce package",
-		"publish": "vsce publish"
+		"vscode:prepublish": "pnpm run compile",
+		"compile": "tsc --noEmit -p ./ && node ../esbuild.js --production",
+		"watch": "node ../esbuild.js --watch",
+		"package": "vsce package --dependencies --follow-symlinks",
+		"publish": "vsce publish --dependencies --follow-symlinks"
 	},
 	"dependencies": {
 		"vscode-languageclient": "9.0.1",

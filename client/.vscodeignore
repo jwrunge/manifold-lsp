@@ -15,7 +15,8 @@ pnpm-lock.yaml.github/**
 **/*.ts
 **/*.tsx
 src/**
-node_modules/**
+node_modules/.cache/**
+node_modules/.bin/**
 **/*.map
 *.code-workspace
 README.local.md

@@ -1,3 +1,5 @@
+// @ts-nocheck
+const path = require("path");
 const esbuild = require("esbuild");
 
 const production = process.argv.includes("--production");
@@ -5,15 +7,16 @@ const watch = process.argv.includes("--watch");
 
 async function main() {
 	const ctx = await esbuild.context({
-		entryPoints: ["client/src/extension.ts"],
+		entryPoints: [path.resolve(__dirname, "client/src/extension.ts")],
 		bundle: true,
 		format: "cjs",
 		minify: production,
 		sourcemap: !production,
 		sourcesContent: false,
 		platform: "node",
-		outfile: "dist/extension.js",
-		external: ["vscode", "vscode-languageclient"],
+		target: "node18",
+		outfile: path.resolve(__dirname, "client/out/extension.js"),
+		external: ["vscode"],
 		logLevel: "silent",
 		plugins: [
 			/* add to the end of plugins array */
