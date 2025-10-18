@@ -12,26 +12,80 @@ use swc_common::{
 };
 use swc_ecma_ast::EsVersion;
 use swc_ecma_ast::{
-    ArrayLit, Callee, Expr, ExprOrSpread, Ident, KeyValueProp, Lit, MemberExpr, MemberProp, Module,
-    ModuleItem, ObjectLit, Prop, PropName, PropOrSpread,
+    self as ast, ArrayLit, Callee, Expr, ExprOrSpread, Ident, KeyValueProp, Lit, MemberExpr,
+    MemberProp, Module, ModuleItem, ObjectLit, Prop, PropName, PropOrSpread,
 };
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsConfig};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeInfo {
     Any,
+    Unknown,
     Number,
     String,
     Boolean,
     Null,
     Array(Box<TypeInfo>),
     Object(HashMap<String, TypeInfo>),
+    Promise(Box<TypeInfo>),
+    Union(Vec<TypeInfo>),
+    Named(String),
 }
 
 impl TypeInfo {
+    pub fn from_union(types: Vec<TypeInfo>) -> TypeInfo {
+        let mut flat: Vec<TypeInfo> = Vec::new();
+        for ty in types {
+            match ty {
+                TypeInfo::Union(inner) => flat.extend(inner),
+                other => flat.push(other),
+            }
+        }
+
+        if flat.iter().any(|ty| matches!(ty, TypeInfo::Any)) {
+            return TypeInfo::Any;
+        }
+
+        let mut unique: Vec<TypeInfo> = Vec::new();
+        for ty in flat {
+            if !unique.iter().any(|existing| existing == &ty) {
+                unique.push(ty);
+            }
+        }
+
+        if unique.is_empty() {
+            TypeInfo::Any
+        } else if unique.len() == 1 {
+            unique.into_iter().next().unwrap()
+        } else {
+            TypeInfo::Union(unique)
+        }
+    }
+
+    pub fn promise_resolution_type(&self) -> Option<TypeInfo> {
+        match self {
+            TypeInfo::Promise(inner) => Some((**inner).clone()),
+            TypeInfo::Union(options) => {
+                let mut collected = Vec::new();
+                for option in options {
+                    if let Some(resolved) = option.promise_resolution_type() {
+                        collected.push(resolved);
+                    }
+                }
+                if collected.is_empty() {
+                    None
+                } else {
+                    Some(TypeInfo::from_union(collected))
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub fn describe(&self) -> String {
         match self {
             TypeInfo::Any => "any".to_string(),
+            TypeInfo::Unknown => "unknown".to_string(),
             TypeInfo::Number => "number".to_string(),
             TypeInfo::String => "string".to_string(),
             TypeInfo::Boolean => "boolean".to_string(),
@@ -49,12 +103,40 @@ impl TypeInfo {
                     format!("{{ {fields} }}")
                 }
             }
+            TypeInfo::Promise(inner) => format!("Promise<{}>", inner.describe()),
+            TypeInfo::Union(types) => {
+                if types.is_empty() {
+                    "never".to_string()
+                } else {
+                    types
+                        .iter()
+                        .map(|ty| ty.describe())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                }
+            }
+            TypeInfo::Named(name) => name.clone(),
         }
     }
 
     pub fn element_type(&self) -> TypeInfo {
         match self {
             TypeInfo::Array(inner) => (*inner.clone()).clone(),
+            TypeInfo::Union(items) => {
+                let mut collected = Vec::new();
+                for item in items {
+                    if let TypeInfo::Array(inner) = item {
+                        collected.push((*inner.clone()).clone());
+                    }
+                }
+                if collected.is_empty() {
+                    TypeInfo::Any
+                } else if collected.iter().all(|ty| ty == &collected[0]) {
+                    collected[0].clone()
+                } else {
+                    TypeInfo::Any
+                }
+            }
             _ => TypeInfo::Any,
         }
     }
@@ -70,7 +152,7 @@ pub struct StateVariable {
 pub struct LoopBinding {
     pub collection: String,
     pub collection_type: TypeInfo,
-    pub item: Option<StateVariable>,
+    pub items: Vec<StateVariable>,
     pub index: Option<StateVariable>,
 }
 
@@ -585,20 +667,53 @@ pub fn resolve_identifier_type(
     };
 
     for segment in segments {
-        current = match current {
-            TypeInfo::Object(ref props) => props.get(segment).cloned().unwrap_or(TypeInfo::Any),
-            TypeInfo::Array(ref inner) => {
-                if segment == "length" {
-                    TypeInfo::Number
-                } else {
-                    (*inner.clone()).clone()
-                }
-            }
-            _ => TypeInfo::Any,
-        };
+        current = resolve_member_type(&current, segment);
     }
 
     Some(current)
+}
+
+pub fn resolve_member_type(current: &TypeInfo, segment: &str) -> TypeInfo {
+    match current {
+        TypeInfo::Object(props) => props.get(segment).cloned().unwrap_or(TypeInfo::Any),
+        TypeInfo::Array(inner) => {
+            if segment == "length" {
+                TypeInfo::Number
+            } else {
+                (*inner.clone()).clone()
+            }
+        }
+        TypeInfo::Union(options) => {
+            let mut collected = Vec::new();
+            let mut saw_any = false;
+            for option in options {
+                let ty = resolve_member_type(option, segment);
+                if matches!(ty, TypeInfo::Any) {
+                    saw_any = true;
+                } else {
+                    collected.push(ty);
+                }
+            }
+
+            if collected.is_empty() {
+                if saw_any {
+                    TypeInfo::Any
+                } else {
+                    TypeInfo::Any
+                }
+            } else {
+                TypeInfo::from_union(collected)
+            }
+        }
+        TypeInfo::Unknown => TypeInfo::Unknown,
+        TypeInfo::Any => TypeInfo::Any,
+        TypeInfo::Promise(_) => TypeInfo::Any,
+        TypeInfo::Named(_) => TypeInfo::Any,
+        TypeInfo::Null => TypeInfo::Null,
+        TypeInfo::Boolean => TypeInfo::Any,
+        TypeInfo::Number => TypeInfo::Any,
+        TypeInfo::String => TypeInfo::Any,
+    }
 }
 
 fn extract_script_blocks_and_srcs(text: &str) -> (Vec<String>, Vec<String>) {
@@ -1187,6 +1302,14 @@ fn infer_type_from_expr(expr: &Expr) -> Option<TypeInfo> {
         },
         Expr::Array(array) => infer_array_type(array),
         Expr::Object(object) => infer_object_type(object),
+        Expr::TsAs(ts_as) => infer_type_from_ts_type(&ts_as.type_ann).unwrap_or(TypeInfo::Any),
+        Expr::TsTypeAssertion(assertion) => {
+            infer_type_from_ts_type(&assertion.type_ann).unwrap_or(TypeInfo::Any)
+        }
+        Expr::TsConstAssertion(assertion) => {
+            infer_type_from_expr(&assertion.expr).unwrap_or(TypeInfo::Any)
+        }
+        Expr::TsNonNull(non_null) => infer_type_from_expr(&non_null.expr).unwrap_or(TypeInfo::Any),
         _ => TypeInfo::Any,
     };
     Some(ty)
@@ -1234,6 +1357,143 @@ fn property_name_from_prop(name: &PropName) -> Option<String> {
     match name {
         PropName::Ident(ident) => Some(ident.sym.to_string()),
         PropName::Str(str_lit) => Some(str_lit.value.to_string()),
+        _ => None,
+    }
+}
+
+fn infer_type_from_ts_type(ts_type: &ast::TsType) -> Option<TypeInfo> {
+    use ast::TsKeywordTypeKind::*;
+
+    match ts_type {
+        ast::TsType::TsKeywordType(keyword) => Some(match keyword.kind {
+            TsStringKeyword => TypeInfo::String,
+            TsNumberKeyword => TypeInfo::Number,
+            TsBooleanKeyword => TypeInfo::Boolean,
+            TsNullKeyword => TypeInfo::Null,
+            TsAnyKeyword => TypeInfo::Any,
+            TsUnknownKeyword => TypeInfo::Unknown,
+            TsUndefinedKeyword => TypeInfo::Named("undefined".to_string()),
+            TsVoidKeyword => TypeInfo::Named("void".to_string()),
+            TsNeverKeyword => TypeInfo::Named("never".to_string()),
+            TsObjectKeyword => TypeInfo::Object(HashMap::new()),
+            TsBigIntKeyword => TypeInfo::Number,
+            TsSymbolKeyword => TypeInfo::Named("symbol".to_string()),
+            _ => TypeInfo::Any,
+        }),
+        ast::TsType::TsUnionOrIntersectionType(union) => match union {
+            ast::TsUnionOrIntersectionType::TsUnionType(union_type) => {
+                let mut members = Vec::new();
+                for ty in &union_type.types {
+                    if let Some(info) = infer_type_from_ts_type(ty) {
+                        members.push(info);
+                    }
+                }
+                if members.is_empty() {
+                    Some(TypeInfo::Any)
+                } else {
+                    Some(TypeInfo::from_union(members))
+                }
+            }
+            ast::TsUnionOrIntersectionType::TsIntersectionType(_) => Some(TypeInfo::Any),
+        },
+        ast::TsType::TsArrayType(array_type) => {
+            let inner = infer_type_from_ts_type(&array_type.elem_type)?;
+            Some(TypeInfo::Array(Box::new(inner)))
+        }
+        ast::TsType::TsTypeRef(type_ref) => {
+            let name = ts_entity_name_to_string(&type_ref.type_name);
+            let generic_args: Vec<TypeInfo> = type_ref
+                .type_params
+                .as_ref()
+                .map(|params| {
+                    params
+                        .params
+                        .iter()
+                        .filter_map(|param| infer_type_from_ts_type(param))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            match name.as_str() {
+                "Promise" => {
+                    let inner = generic_args.get(0).cloned().unwrap_or(TypeInfo::Unknown);
+                    Some(TypeInfo::Promise(Box::new(inner)))
+                }
+                "Array" | "ReadonlyArray" => {
+                    let inner = generic_args.get(0).cloned().unwrap_or(TypeInfo::Any);
+                    Some(TypeInfo::Array(Box::new(inner)))
+                }
+                _ => {
+                    if generic_args.is_empty() {
+                        Some(TypeInfo::Named(name))
+                    } else {
+                        let rendered = format!(
+                            "{}<{}>",
+                            name,
+                            generic_args
+                                .iter()
+                                .map(|arg| arg.describe())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        Some(TypeInfo::Named(rendered))
+                    }
+                }
+            }
+        }
+        ast::TsType::TsTypeLit(type_lit) => {
+            let mut props = HashMap::new();
+            for member in &type_lit.members {
+                if let ast::TsTypeElement::TsPropertySignature(prop) = member {
+                    if let Some(name) = ts_property_key_to_string(&prop.key) {
+                        let value = prop
+                            .type_ann
+                            .as_ref()
+                            .and_then(|ann| infer_type_from_ts_type(&ann.type_ann))
+                            .unwrap_or(TypeInfo::Any);
+                        props.insert(name, value);
+                    }
+                }
+            }
+            Some(TypeInfo::Object(props))
+        }
+        ast::TsType::TsParenthesizedType(paren) => infer_type_from_ts_type(&paren.type_ann),
+        ast::TsType::TsLitType(lit) => match &lit.lit {
+            ast::TsLit::Str(_) => Some(TypeInfo::String),
+            ast::TsLit::Bool(_) => Some(TypeInfo::Boolean),
+            ast::TsLit::Number(_) => Some(TypeInfo::Number),
+            ast::TsLit::BigInt(_) => Some(TypeInfo::Number),
+            ast::TsLit::Tpl(_) => Some(TypeInfo::String),
+        },
+        ast::TsType::TsOptionalType(optional) => {
+            let base = infer_type_from_ts_type(&optional.type_ann)?;
+            Some(TypeInfo::from_union(vec![
+                base,
+                TypeInfo::Named("undefined".to_string()),
+            ]))
+        }
+        _ => Some(TypeInfo::Any),
+    }
+}
+
+fn ts_entity_name_to_string(name: &ast::TsEntityName) -> String {
+    match name {
+        ast::TsEntityName::Ident(ident) => ident.sym.to_string(),
+        ast::TsEntityName::TsQualifiedName(qualified) => {
+            format!(
+                "{}.{}",
+                ts_entity_name_to_string(&qualified.left),
+                qualified.right.sym
+            )
+        }
+    }
+}
+
+fn ts_property_key_to_string(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident(ident) => Some(ident.sym.to_string()),
+        Expr::Lit(Lit::Str(str_lit)) => Some(str_lit.value.to_string()),
+        Expr::Lit(Lit::Num(num_lit)) => Some(num_lit.value.to_string()),
         _ => None,
     }
 }

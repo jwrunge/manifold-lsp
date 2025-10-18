@@ -584,7 +584,7 @@ impl LanguageServer for Backend {
                         binding.collection,
                         binding.collection_type.describe()
                     ));
-                    if let Some(item) = &binding.item {
+                    for item in &binding.items {
                         binding_lines.push(format!("Item `{}`: {}", item.name, item.ty.describe()));
                     }
                     if let Some(index) = &binding.index {

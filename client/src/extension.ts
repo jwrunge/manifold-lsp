@@ -37,7 +37,7 @@ import {
 } from "vscode-languageclient/node";
 import { accessSync, constants } from "fs";
 import * as path from "path";
-import which from "which";
+import which = require("which");
 
 let client: LanguageClient;
 let statusItem: StatusBarItem | undefined;
@@ -62,6 +62,11 @@ function resolveServerCommand(
 		outputChannel.appendLine(
 			`SERVER_PATH is set to "${override}" but the file is not executable or does not exist.`
 		);
+	}
+
+	const workspaceBinary = getWorkspaceBinary(context, outputChannel);
+	if (workspaceBinary) {
+		return workspaceBinary;
 	}
 
 	const bundled = getBundledBinary(context, outputChannel);
@@ -151,6 +156,33 @@ function getBundledBinary(
 		outputChannel.appendLine(
 			"No bundled Manifold language server binary was found in the extension package."
 		);
+	}
+
+	return undefined;
+}
+
+function getWorkspaceBinary(
+	context: ExtensionContext,
+	outputChannel: OutputChannel
+): string | undefined {
+	const platform = process.platform;
+	const binaryName =
+		platform === "win32"
+			? "manifold-language-server.exe"
+			: "manifold-language-server";
+	const repoRoot = path.resolve(context.extensionPath, "..");
+	const candidates = [
+		path.join(repoRoot, "target", "debug", binaryName),
+		path.join(repoRoot, "target", "release", binaryName),
+	];
+
+	for (const candidate of candidates) {
+		if (isExecutable(candidate)) {
+			outputChannel.appendLine(
+				`Using workspace language server binary at ${candidate}`
+			);
+			return candidate;
+		}
 	}
 
 	return undefined;

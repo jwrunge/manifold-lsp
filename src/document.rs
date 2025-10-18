@@ -4,15 +4,16 @@ use tower_lsp::lsp_types::{
 
 use super::attribute::{ManifoldAttribute, ManifoldAttributeKind, ParsedAttribute};
 use super::expression::{
-    tokenize_expression, validate_expression_with_context, ExpressionToken, ExpressionTokenKind,
-    ValidationContext,
+    parse_expression_ast, tokenize_expression, validate_expression_with_context, ExpressionToken,
+    ExpressionTokenKind, ValidationContext,
 };
 use super::lineindex::LineIndex;
 use std::collections::{HashMap, HashSet};
+use swc_ecma_ast::{Expr, Lit};
 
 use super::state::{
-    parse_states_from_document, resolve_identifier_type, LoopBinding, ManifoldStates,
-    StateVariable, TypeInfo,
+    parse_states_from_document, resolve_identifier_type, resolve_member_type, LoopBinding,
+    ManifoldStates, StateVariable, TypeInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -184,11 +185,19 @@ impl ManifoldDocument {
                 continue;
             };
 
+            let lower_name = attribute.name.to_ascii_lowercase();
+            if lower_name.starts_with(":on") || lower_name.starts_with("data-mf-on") {
+                continue;
+            }
+
             if span_end < range_start || span_start > range_end {
                 continue;
             }
 
             if let Some(type_info) = self.expression_type(attribute) {
+                if matches!(type_info, TypeInfo::Any) {
+                    continue;
+                }
                 let label_text = format!(": {}", type_info.describe());
                 let position = self.line_index.position_at(span_end);
 
@@ -294,7 +303,11 @@ impl ManifoldDocument {
 
             // Skip variable reference validation for :each expressions since they have special syntax
             let skip_variable_validation = attribute.name.eq_ignore_ascii_case(":each")
-                || attribute.name.eq_ignore_ascii_case("data-mf-each");
+                || attribute.name.eq_ignore_ascii_case("data-mf-each")
+                || attribute.name.eq_ignore_ascii_case(":then")
+                || attribute.name.eq_ignore_ascii_case("data-mf-then")
+                || attribute.name.eq_ignore_ascii_case(":catch")
+                || attribute.name.eq_ignore_ascii_case("data-mf-catch");
 
             if let Err(message) = validate_expression_with_context(
                 expr,
@@ -434,7 +447,7 @@ fn attribute_contains_offset(attribute: &ManifoldAttribute, offset: usize) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower_lsp::lsp_types::{Position, Range};
+    use tower_lsp::lsp_types::{DiagnosticSeverity, Position, Range};
 
     const SAMPLE_HTML: &str = r#"
         <div data-mf-register>
@@ -451,6 +464,30 @@ mod tests {
                 .add("count", 0)
                 .add("items", ["A", "B"])
                 .add("status", "idle")
+                .build();
+        </script>
+    "#;
+
+    const ADVANCED_HTML: &str = r#"
+        <div data-mf-register>
+            <button :onclick=""></button>
+            <div :await="currentUserPromise">Loading...</div>
+            <div :then="{ name, age }">
+                User: ${name} (${age})
+            </div>
+            <div :catch="errorMsg">
+                Error: ${errorMsg}
+            </div>
+            <ul>
+                <li :each="someArray as { name, age }, idx">
+                    ${name} (${age}) #${idx}
+                </li>
+            </ul>
+        </div>
+        <script type="module">
+            const state = Manifold.create()
+                .add("currentUserPromise", null as Promise<unknown> | null)
+                .add("someArray", [{ name: "Ada", age: 37 }])
                 .build();
         </script>
     "#;
@@ -535,6 +572,110 @@ mod tests {
             .expect("should detect attribute at closing quote");
         assert_eq!(attribute.name, ":if".to_string());
     }
+
+    #[test]
+    fn await_attribute_infers_promise_type() {
+        let document = ManifoldDocument::parse(ADVANCED_HTML);
+        let await_attr = document
+            .attributes
+            .iter()
+            .find(|attr| attr.name.eq_ignore_ascii_case(":await"))
+            .expect(":await attribute present");
+        let ty = document
+            .expression_type(await_attr)
+            .expect(":await attribute should have a type");
+        assert_eq!(ty.describe(), "Promise<unknown> | null");
+    }
+
+    #[test]
+    fn then_destructuring_binds_variables() {
+        let document = ManifoldDocument::parse(ADVANCED_HTML);
+        let position = position_in(&document, "${name}", 3);
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected completions in :then block");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"name".to_string()));
+        assert!(labels.contains(&"age".to_string()));
+    }
+
+    #[test]
+    fn catch_block_exposes_error_variable() {
+        let document = ManifoldDocument::parse(ADVANCED_HTML);
+        let position = position_in(&document, "${errorMsg}", 3);
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected completions in :catch block");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"errorMsg".to_string()));
+    }
+
+    #[test]
+    fn each_destructuring_adds_loop_locals() {
+        let document = ManifoldDocument::parse(ADVANCED_HTML);
+        let position = position_in(&document, "${name} (${age}) #${idx}", 3);
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected completions in :each block");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"name".to_string()));
+        assert!(labels.contains(&"age".to_string()));
+        assert!(labels.contains(&"idx".to_string()));
+    }
+
+    #[test]
+    fn each_literal_array_infers_string_items() {
+        let html = r#"
+            <div data-mf-register>
+                <ul>
+                    <li :each="['Error A', 'Error B'] as msg, idx">${msg}</li>
+                </ul>
+            </div>
+        "#;
+        let document = ManifoldDocument::parse(html);
+        let position = position_in(&document, "${msg}", 3);
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected completions in literal each block");
+        let msg = completions
+            .iter()
+            .find(|c| c.label == "msg")
+            .expect("msg completion present");
+        assert_eq!(msg.detail.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn dollar_helper_available_in_attributes() {
+        let document = ManifoldDocument::parse(ADVANCED_HTML);
+        let onclick_attr = document
+            .attributes
+            .iter()
+            .find(|attr| attr.name.eq_ignore_ascii_case(":onclick"))
+            .expect(":onclick attribute present");
+        let offset = onclick_attr
+            .expression_span
+            .map(|(start, _)| start)
+            .unwrap_or(onclick_attr.start_offset);
+        let position = document.line_index.position_at(offset);
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected attribute completions");
+        let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"$".to_string()));
+    }
+
+    #[test]
+    fn example_document_has_no_unknown_variable_diagnostics() {
+        let html = include_str!("../examples/index.html");
+        let base_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let document = ManifoldDocument::parse_with_base(html, Some(base_dir.as_path()));
+        let diagnostics = document.diagnostics();
+        let errors: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+            .collect();
+        assert!(errors.is_empty(), "unexpected diagnostics: {errors:?}");
+    }
 }
 
 fn extract_identifier_chain(expr: &str, tokens: &[ExpressionToken]) -> Option<String> {
@@ -578,6 +719,7 @@ struct TagScanner<'a> {
     idx: usize,
     stack: Vec<AncestorState>,
     results: Vec<ManifoldAttribute>,
+    pending_await: Option<AwaitContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +728,25 @@ struct AncestorState {
     ignore_active: bool,
     state_name: Option<String>,
     locals: HashMap<String, TypeInfo>,
+}
+
+#[derive(Debug, Clone)]
+struct AwaitContext {
+    promise_type: TypeInfo,
+    depth: usize,
+    consumed_then: bool,
+    consumed_catch: bool,
+}
+
+impl AwaitContext {
+    fn new(promise_type: TypeInfo, depth: usize) -> Self {
+        Self {
+            promise_type,
+            depth,
+            consumed_then: false,
+            consumed_catch: false,
+        }
+    }
 }
 
 impl<'a> TagScanner<'a> {
@@ -598,6 +759,7 @@ impl<'a> TagScanner<'a> {
             idx: 0,
             stack: Vec::new(),
             results: Vec::new(),
+            pending_await: None,
         }
     }
 
@@ -645,6 +807,11 @@ impl<'a> TagScanner<'a> {
             self.idx += 1;
         }
         self.stack.pop();
+        if let Some(context) = &self.pending_await {
+            if context.depth > self.stack.len() {
+                self.pending_await = None;
+            }
+        }
     }
 
     fn handle_opening_tag(&mut self, tag_start: usize) {
@@ -811,12 +978,17 @@ impl<'a> TagScanner<'a> {
         }
 
         if new_state.registered && !new_state.ignore_active {
+            TagScanner::ensure_global_helpers(&mut new_state.locals);
             let mut pending_locals: Vec<StateVariable> = Vec::new();
 
             for attr in parsed_attributes
                 .iter()
                 .filter(|attr| attr.name.starts_with(':') || attr.name_lower.starts_with("data-mf"))
             {
+                let attr_lower = attr.name_lower.as_str();
+                if attr_lower == ":transition" || attr_lower == "data-mf-transition" {
+                    continue;
+                }
                 let (start, end, expression, expression_span) = match attr.value_range {
                     Some((value_start, value_end)) if value_end > value_start => {
                         let raw = &self.text[value_start..value_end];
@@ -868,7 +1040,7 @@ impl<'a> TagScanner<'a> {
                 let state_name_snapshot = new_state.state_name.clone();
 
                 let mut loop_binding = None;
-                if attr.name_lower == ":each" {
+                if attr_lower == ":each" || attr_lower == "data-mf-each" {
                     if let Some(expr_text) = expression.as_ref() {
                         loop_binding = self.parse_each_binding(
                             expr_text,
@@ -876,13 +1048,84 @@ impl<'a> TagScanner<'a> {
                             &new_state.locals,
                         );
                         if let Some(binding) = &loop_binding {
-                            if let Some(item) = &binding.item {
+                            for item in &binding.items {
                                 pending_locals.push(item.clone());
                             }
                             if let Some(index) = &binding.index {
                                 pending_locals.push(index.clone());
                             }
                         }
+                    }
+                }
+
+                if attr_lower == ":await" || attr_lower == "data-mf-await" {
+                    let promise_type = expression
+                        .as_ref()
+                        .and_then(|expr_text| {
+                            TagScanner::parse_identifier_chain(expr_text.as_str())
+                        })
+                        .and_then(|identifier| {
+                            let state = state_name_snapshot
+                                .as_deref()
+                                .and_then(|name| self.states.get(name));
+                            resolve_identifier_type(&identifier, state, &new_state.locals)
+                        })
+                        .unwrap_or(TypeInfo::Any);
+                    self.pending_await = Some(AwaitContext::new(promise_type, self.stack.len()));
+                }
+
+                if attr_lower == ":then" || attr_lower == "data-mf-then" {
+                    if let Some(expr_text) = expression.as_ref() {
+                        if let Some(context) = self.pending_await.as_mut() {
+                            if context.depth == self.stack.len() {
+                                let resolved = context.promise_type.promise_resolution_type();
+                                let fallback = TypeInfo::Any;
+                                let bindings = TagScanner::extract_pattern_bindings(
+                                    expr_text,
+                                    resolved.as_ref(),
+                                    &fallback,
+                                );
+                                if !bindings.is_empty() {
+                                    pending_locals.extend(bindings.into_iter());
+                                }
+                                context.consumed_then = true;
+                            }
+                        }
+                    }
+                }
+
+                if attr_lower == ":catch" || attr_lower == "data-mf-catch" {
+                    if let Some(expr_text) = expression.as_ref() {
+                        if let Some(context) = self.pending_await.as_mut() {
+                            if context.depth == self.stack.len() {
+                                let fallback = TypeInfo::Named("Error".to_string());
+                                let bindings = TagScanner::extract_pattern_bindings(
+                                    expr_text,
+                                    Some(&fallback),
+                                    &fallback,
+                                );
+                                if !bindings.is_empty() {
+                                    pending_locals.extend(bindings.into_iter());
+                                }
+                                context.consumed_catch = true;
+                            }
+                        }
+                    }
+                }
+
+                if matches!(
+                    attr_lower,
+                    ":then" | "data-mf-then" | ":catch" | "data-mf-catch"
+                ) {
+                    let should_clear = self
+                        .pending_await
+                        .as_ref()
+                        .map(|ctx| {
+                            ctx.depth == self.stack.len() && ctx.consumed_then && ctx.consumed_catch
+                        })
+                        .unwrap_or(false);
+                    if should_clear {
+                        self.pending_await = None;
                     }
                 }
 
@@ -1057,32 +1300,262 @@ impl<'a> TagScanner<'a> {
             return None;
         }
 
-        let mut binding_parts = bindings
-            .split(',')
-            .map(|segment| segment.trim())
-            .filter(|segment| !segment.is_empty());
-        let item_name = binding_parts.next();
-        let index_name = binding_parts.next();
+        let (item_part, key_part) = Self::split_each_bindings(bindings);
+        if item_part.is_empty() {
+            return None;
+        }
 
         let state = state_name.and_then(|name| self.states.get(name));
-        let collection_type =
-            resolve_identifier_type(collection, state, locals).unwrap_or(TypeInfo::Any);
+        let collection_type = TagScanner::infer_collection_literal_type(collection)
+            .or_else(|| resolve_identifier_type(collection, state, locals))
+            .unwrap_or(TypeInfo::Any);
         let element_type = collection_type.element_type();
 
-        let item = item_name.map(|name| StateVariable {
-            name: name.to_string(),
-            ty: element_type.clone(),
-        });
-        let index = index_name.map(|name| StateVariable {
-            name: name.to_string(),
-            ty: TypeInfo::Number,
+        let fallback_any = TypeInfo::Any;
+        let items = Self::extract_pattern_bindings(item_part, Some(&element_type), &fallback_any);
+
+        if items.is_empty() {
+            return None;
+        }
+
+        let index = key_part.and_then(|name| {
+            let trimmed = name.trim();
+            if trimmed.is_empty() || !Self::is_valid_identifier(trimmed) {
+                None
+            } else {
+                Some(StateVariable {
+                    name: trimmed.to_string(),
+                    ty: TypeInfo::Number,
+                })
+            }
         });
 
         Some(LoopBinding {
             collection: collection.to_string(),
             collection_type,
-            item,
+            items,
             index,
         })
+    }
+
+    fn infer_collection_literal_type(expression: &str) -> Option<TypeInfo> {
+        let ast = parse_expression_ast(expression).ok()?;
+        match ast.as_ref() {
+            Expr::Array(array) => {
+                let mut element_types: Vec<TypeInfo> = Vec::new();
+                for elem in array.elems.iter().flatten() {
+                    if elem.spread.is_some() {
+                        return None;
+                    }
+                    let ty = TagScanner::infer_literal_value_type(elem.expr.as_ref())?;
+                    element_types.push(ty);
+                }
+                let element_type = if element_types.is_empty() {
+                    TypeInfo::Any
+                } else {
+                    TypeInfo::from_union(element_types)
+                };
+                Some(TypeInfo::Array(Box::new(element_type)))
+            }
+            _ => None,
+        }
+    }
+
+    fn infer_literal_value_type(expr: &Expr) -> Option<TypeInfo> {
+        match expr {
+            Expr::Lit(lit) => match lit {
+                Lit::Str(_) => Some(TypeInfo::String),
+                Lit::Num(_) => Some(TypeInfo::Number),
+                Lit::Bool(_) => Some(TypeInfo::Boolean),
+                Lit::Null(_) => Some(TypeInfo::Null),
+                Lit::BigInt(_) => Some(TypeInfo::Number),
+                _ => Some(TypeInfo::Any),
+            },
+            Expr::Array(array) => {
+                let mut element_types: Vec<TypeInfo> = Vec::new();
+                for elem in array.elems.iter().flatten() {
+                    if elem.spread.is_some() {
+                        return Some(TypeInfo::Any);
+                    }
+                    let ty = TagScanner::infer_literal_value_type(elem.expr.as_ref())?;
+                    element_types.push(ty);
+                }
+                let element_type = if element_types.is_empty() {
+                    TypeInfo::Any
+                } else {
+                    TypeInfo::from_union(element_types)
+                };
+                Some(TypeInfo::Array(Box::new(element_type)))
+            }
+            _ => None,
+        }
+    }
+
+    fn parse_identifier_chain(expr: &str) -> Option<String> {
+        let trimmed = expr.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        for segment in trimmed.split('.') {
+            let candidate = segment.trim();
+            if candidate.is_empty() || !Self::is_valid_identifier(candidate) {
+                return None;
+            }
+            parts.push(candidate);
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("."))
+        }
+    }
+
+    fn extract_pattern_bindings(
+        pattern: &str,
+        base_type: Option<&TypeInfo>,
+        fallback: &TypeInfo,
+    ) -> Vec<StateVariable> {
+        let mut results = Vec::new();
+        let trimmed = pattern.trim();
+        if trimmed.is_empty() {
+            return results;
+        }
+
+        if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            let inner = &trimmed[1..trimmed.len().saturating_sub(1)];
+            for segment in inner.split(',') {
+                let segment = segment.trim();
+                if segment.is_empty() || segment.starts_with("...") {
+                    continue;
+                }
+
+                let mut parts = segment.splitn(2, ':');
+                let source = parts.next().unwrap_or("").trim();
+                if source.is_empty() {
+                    continue;
+                }
+                let target = parts
+                    .next()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(source);
+
+                if !Self::is_valid_identifier(target) {
+                    continue;
+                }
+
+                let property_name = Self::normalize_property_key(source);
+                if property_name.is_empty() {
+                    continue;
+                }
+
+                let property_type = base_type
+                    .map(|base| resolve_member_type(base, &property_name))
+                    .filter(|ty| !matches!(ty, TypeInfo::Any))
+                    .unwrap_or_else(|| (*fallback).clone());
+
+                results.push(StateVariable {
+                    name: target.to_string(),
+                    ty: property_type,
+                });
+            }
+        } else if Self::is_valid_identifier(trimmed) {
+            let ty = base_type.cloned().unwrap_or_else(|| (*fallback).clone());
+            results.push(StateVariable {
+                name: trimmed.to_string(),
+                ty,
+            });
+        }
+
+        results
+    }
+
+    fn normalize_property_key(source: &str) -> String {
+        let trimmed = source.trim();
+        if trimmed.len() >= 2
+            && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+                || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+        {
+            trimmed[1..trimmed.len() - 1].to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn ensure_global_helpers(locals: &mut HashMap<String, TypeInfo>) {
+        if !locals.contains_key("$") {
+            locals.insert("$".to_string(), Self::dollar_helpers_type());
+        }
+    }
+
+    fn dollar_helpers_type() -> TypeInfo {
+        let mut props = HashMap::new();
+        props.insert(
+            "get".to_string(),
+            TypeInfo::Named(
+                "get(url: string | URL, fetchOps?: RequestInit, defaultOps?: Omit<import(\"./fetch.ts\").FetchDOMOptions, \"to\" | \"method\">): import(\"./fetch.ts\").FetchedContent"
+                    .to_string(),
+            ),
+        );
+        props.insert(
+            "post".to_string(),
+            TypeInfo::Named(
+                "post(url: string | URL, fetchOps?: RequestInit, defaultOps?: Omit<import(\"./fetch.ts\").FetchDOMOptions, \"to\" | \"method\">): import(\"./fetch.ts\").FetchedContent"
+                    .to_string(),
+            ),
+        );
+        props.insert(
+            "fetch".to_string(),
+            TypeInfo::Named(
+                "fetch(url: string | URL, ops: import(\"./fetch.ts\").FetchDOMOptions, fetchOps?: RequestInit): Promise<void>"
+                    .to_string(),
+            ),
+        );
+        TypeInfo::Object(props)
+    }
+
+    fn split_each_bindings(bindings: &str) -> (&str, Option<&str>) {
+        let mut depth = 0i32;
+        for (idx, ch) in bindings.char_indices() {
+            match ch {
+                '{' | '[' | '(' => depth += 1,
+                '}' | ']' | ')' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                ',' if depth == 0 => {
+                    let item = bindings[..idx].trim();
+                    let key = bindings[idx + 1..].trim();
+                    let key_opt = if key.is_empty() { None } else { Some(key) };
+                    return (item, key_opt);
+                }
+                _ => {}
+            }
+        }
+
+        (bindings.trim(), None)
+    }
+
+    fn is_valid_identifier(name: &str) -> bool {
+        let mut chars = name.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !Self::is_valid_identifier_start(first) {
+            return false;
+        }
+        chars.all(Self::is_valid_identifier_part)
+    }
+
+    fn is_valid_identifier_start(ch: char) -> bool {
+        ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+    }
+
+    fn is_valid_identifier_part(ch: char) -> bool {
+        Self::is_valid_identifier_start(ch) || ch.is_ascii_digit()
     }
 }
