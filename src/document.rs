@@ -4,11 +4,12 @@ use tower_lsp::lsp_types::{
 
 use super::attribute::{ManifoldAttribute, ManifoldAttributeKind, ParsedAttribute};
 use super::expression::{
-    tokenize_expression, validate_expression_with_context, ExpressionToken, ExpressionTokenKind,
-    ValidationContext,
+    parse_expression_ast, tokenize_expression, validate_expression_with_context, ExpressionToken,
+    ExpressionTokenKind, ValidationContext,
 };
 use super::lineindex::LineIndex;
 use std::collections::{HashMap, HashSet};
+use swc_ecma_ast::{Expr, Lit};
 
 use super::state::{
     parse_states_from_document, resolve_identifier_type, resolve_member_type, LoopBinding,
@@ -184,11 +185,19 @@ impl ManifoldDocument {
                 continue;
             };
 
+            let lower_name = attribute.name.to_ascii_lowercase();
+            if lower_name.starts_with(":on") || lower_name.starts_with("data-mf-on") {
+                continue;
+            }
+
             if span_end < range_start || span_start > range_end {
                 continue;
             }
 
             if let Some(type_info) = self.expression_type(attribute) {
+                if matches!(type_info, TypeInfo::Any) {
+                    continue;
+                }
                 let label_text = format!(": {}", type_info.describe());
                 let position = self.line_index.position_at(span_end);
 
@@ -612,6 +621,27 @@ mod tests {
         assert!(labels.contains(&"name".to_string()));
         assert!(labels.contains(&"age".to_string()));
         assert!(labels.contains(&"idx".to_string()));
+    }
+
+    #[test]
+    fn each_literal_array_infers_string_items() {
+        let html = r#"
+            <div data-mf-register>
+                <ul>
+                    <li :each="['Error A', 'Error B'] as msg, idx">${msg}</li>
+                </ul>
+            </div>
+        "#;
+        let document = ManifoldDocument::parse(html);
+        let position = position_in(&document, "${msg}", 3);
+        let completions = document
+            .completion_candidates(&position)
+            .expect("expected completions in literal each block");
+        let msg = completions
+            .iter()
+            .find(|c| c.label == "msg")
+            .expect("msg completion present");
+        assert_eq!(msg.detail.as_deref(), Some("string"));
     }
 
     #[test]
@@ -1276,8 +1306,9 @@ impl<'a> TagScanner<'a> {
         }
 
         let state = state_name.and_then(|name| self.states.get(name));
-        let collection_type =
-            resolve_identifier_type(collection, state, locals).unwrap_or(TypeInfo::Any);
+        let collection_type = TagScanner::infer_collection_literal_type(collection)
+            .or_else(|| resolve_identifier_type(collection, state, locals))
+            .unwrap_or(TypeInfo::Any);
         let element_type = collection_type.element_type();
 
         let fallback_any = TypeInfo::Any;
@@ -1305,6 +1336,59 @@ impl<'a> TagScanner<'a> {
             items,
             index,
         })
+    }
+
+    fn infer_collection_literal_type(expression: &str) -> Option<TypeInfo> {
+        let ast = parse_expression_ast(expression).ok()?;
+        match ast.as_ref() {
+            Expr::Array(array) => {
+                let mut element_types: Vec<TypeInfo> = Vec::new();
+                for elem in array.elems.iter().flatten() {
+                    if elem.spread.is_some() {
+                        return None;
+                    }
+                    let ty = TagScanner::infer_literal_value_type(elem.expr.as_ref())?;
+                    element_types.push(ty);
+                }
+                let element_type = if element_types.is_empty() {
+                    TypeInfo::Any
+                } else {
+                    TypeInfo::from_union(element_types)
+                };
+                Some(TypeInfo::Array(Box::new(element_type)))
+            }
+            _ => None,
+        }
+    }
+
+    fn infer_literal_value_type(expr: &Expr) -> Option<TypeInfo> {
+        match expr {
+            Expr::Lit(lit) => match lit {
+                Lit::Str(_) => Some(TypeInfo::String),
+                Lit::Num(_) => Some(TypeInfo::Number),
+                Lit::Bool(_) => Some(TypeInfo::Boolean),
+                Lit::Null(_) => Some(TypeInfo::Null),
+                Lit::BigInt(_) => Some(TypeInfo::Number),
+                _ => Some(TypeInfo::Any),
+            },
+            Expr::Array(array) => {
+                let mut element_types: Vec<TypeInfo> = Vec::new();
+                for elem in array.elems.iter().flatten() {
+                    if elem.spread.is_some() {
+                        return Some(TypeInfo::Any);
+                    }
+                    let ty = TagScanner::infer_literal_value_type(elem.expr.as_ref())?;
+                    element_types.push(ty);
+                }
+                let element_type = if element_types.is_empty() {
+                    TypeInfo::Any
+                } else {
+                    TypeInfo::from_union(element_types)
+                };
+                Some(TypeInfo::Array(Box::new(element_type)))
+            }
+            _ => None,
+        }
     }
 
     fn parse_identifier_chain(expr: &str) -> Option<String> {

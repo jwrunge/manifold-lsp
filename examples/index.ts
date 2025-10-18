@@ -4,7 +4,7 @@ type DemoUser = { name: string; age: number };
 
 const myState = $.create()
 	.add("count", 0)
-	.add("popup", (e: unknown) => console.log(e))
+	.add("popup", console.log)
 	.add("nextFail", false)
 	.add(
 		"currentUserPromise",
@@ -27,18 +27,18 @@ const myState = $.create()
 			: 1;
 		myState.list.push({ id: nextId, text: `Item ${nextId}` });
 	})
-	.add("removeFromList", (key: number) => {
+	.add("removeFromList", (key = 0) => {
 		myState.list.splice(key, 1);
 	})
 	// Provide placeholder so the property exists on the type
-	.add("loadUser", () => Promise.resolve<DemoUser>({ name: "", age: 0 }))
+	.add("loadUser", () => Promise.resolve({ name: "", age: 0 }))
 	.build();
 
 myState.loadUser = () => {
 	const fail = !!myState.nextFail;
 	myState.nextFail = !fail;
 
-	const p: Promise<DemoUser> = new Promise((res, rej) =>
+	const p = new Promise<DemoUser>((res, rej) =>
 		setTimeout(() => {
 			if (fail) console.log("REJECTING PROMISE");
 			else console.log("RESOLVING PROMISE");
