@@ -1,6 +1,6 @@
 [package]
 name = "manifold-language-server"
-version = "1.0.13"
+version = "1.0.14"
 edition = "2021"
 autobins = false
 
