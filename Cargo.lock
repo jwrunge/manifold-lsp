@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "manifold-language-server"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "dashmap",
  "serde",

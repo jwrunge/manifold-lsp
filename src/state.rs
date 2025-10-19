@@ -685,22 +685,15 @@ pub fn resolve_member_type(current: &TypeInfo, segment: &str) -> TypeInfo {
         }
         TypeInfo::Union(options) => {
             let mut collected = Vec::new();
-            let mut saw_any = false;
             for option in options {
                 let ty = resolve_member_type(option, segment);
-                if matches!(ty, TypeInfo::Any) {
-                    saw_any = true;
-                } else {
+                if !matches!(ty, TypeInfo::Any) {
                     collected.push(ty);
                 }
             }
 
             if collected.is_empty() {
-                if saw_any {
-                    TypeInfo::Any
-                } else {
-                    TypeInfo::Any
-                }
+                TypeInfo::Any
             } else {
                 TypeInfo::from_union(collected)
             }
@@ -1416,11 +1409,11 @@ fn infer_type_from_ts_type(ts_type: &ast::TsType) -> Option<TypeInfo> {
 
             match name.as_str() {
                 "Promise" => {
-                    let inner = generic_args.get(0).cloned().unwrap_or(TypeInfo::Unknown);
+                    let inner = generic_args.first().cloned().unwrap_or(TypeInfo::Unknown);
                     Some(TypeInfo::Promise(Box::new(inner)))
                 }
                 "Array" | "ReadonlyArray" => {
-                    let inner = generic_args.get(0).cloned().unwrap_or(TypeInfo::Any);
+                    let inner = generic_args.first().cloned().unwrap_or(TypeInfo::Any);
                     Some(TypeInfo::Array(Box::new(inner)))
                 }
                 _ => {
