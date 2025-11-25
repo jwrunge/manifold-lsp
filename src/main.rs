@@ -252,10 +252,12 @@ mod tests {
         assert!(err.contains("Template literals"));
         assert!(err.contains("Use string concatenation"));
 
-        // Test global access
-        let err = validate_expression("Math.max(1, 2)", false, false).unwrap_err();
-        assert!(err.contains("Global 'Math' is not available"));
-        assert!(err.contains("Manifold state functions"));
+        // Test safe global access
+        assert!(validate_expression("Math.max(1, 2)", false, false).is_ok());
+
+        // Test restricted global access
+        let err = validate_expression("window.location.href", false, false).unwrap_err();
+        assert!(err.contains("Global 'window' is not available"));
 
         // Test typeof operator
         let err = validate_expression("typeof value", false, false).unwrap_err();
@@ -318,6 +320,7 @@ mod tests {
         assert!(validate_expression("user.name", false, false).is_ok());
         assert!(validate_expression("items[0]", false, false).is_ok());
         assert!(validate_expression("a + b", false, false).is_ok());
+        assert!(validate_expression("console.log('x')", false, false).is_ok());
         assert!(validate_expression("condition ? value1 : value2", false, false).is_ok());
         assert!(validate_expression("{ key: value }", false, false).is_ok());
         assert!(validate_expression("[1, 2, 3]", false, false).is_ok());

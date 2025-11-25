@@ -791,14 +791,33 @@ fn validate_identifier_reference(
     })
 }
 
+fn is_safe_global(name: &str) -> bool {
+    matches!(
+        name,
+        "Array"
+            | "Boolean"
+            | "console"
+            | "Date"
+            | "JSON"
+            | "Map"
+            | "Math"
+            | "Number"
+            | "Object"
+            | "Promise"
+            | "Reflect"
+            | "Set"
+            | "String"
+            | "Symbol"
+            | "WeakMap"
+            | "WeakSet"
+    )
+}
+
 fn is_known_global(name: &str) -> bool {
     matches!(
         name,
-        "Math"
-            | "Date"
-            | "window"
+        "window"
             | "document"
-            | "console"
             | "JSON"
             | "localStorage"
             | "sessionStorage"
@@ -810,19 +829,13 @@ fn is_known_global(name: &str) -> bool {
             | "alert"
             | "confirm"
             | "prompt"
-            | "Array"
-            | "Object"
-            | "String"
-            | "Number"
-            | "Boolean"
             | "RegExp"
             | "Error"
-            | "Promise"
             | "undefined"
             | "null"
             | "true"
             | "false"
-    )
+    ) || is_safe_global(name)
 }
 
 fn check_opt_chain(opt: &ast::OptChainExpr, restrictions: &Restrictions) -> Result<(), String> {
@@ -850,24 +863,15 @@ fn check_for_global_access(member: &ast::MemberExpr) -> Option<String> {
     // Check if this is accessing a known global object
     if let ast::Expr::Ident(ident) = &*member.obj {
         let name = ident.sym.as_str();
+        if is_safe_global(name) {
+            return None;
+        }
         match name {
-            "Math" => {
-                return Some("Math functions are not available in Manifold expressions. Define mathematical operations in your Manifold state functions instead.".into());
-            }
-            "Date" => {
-                return Some("Date functions are not available in Manifold expressions. Define date operations in your Manifold state functions instead.".into());
-            }
             "window" => {
                 return Some("Window object is not available in Manifold expressions. Define browser interactions in your Manifold state functions instead.".into());
             }
             "document" => {
                 return Some("Document object is not available in Manifold expressions. Use Manifold directives for DOM manipulation instead.".into());
-            }
-            "console" => {
-                return Some("Console functions are not available in Manifold expressions. Use console methods in your Manifold state functions for debugging instead.".into());
-            }
-            "JSON" => {
-                return Some("JSON functions are not available in Manifold expressions. Define JSON operations in your Manifold state functions instead.".into());
             }
             "localStorage" | "sessionStorage" => {
                 return Some("Storage APIs are not available in Manifold expressions. Define storage operations in your Manifold state functions instead.".into());
@@ -889,12 +893,14 @@ fn check_for_global_access(member: &ast::MemberExpr) -> Option<String> {
 
 fn check_for_global_identifier(ident: &ast::Ident) -> Option<String> {
     let name = ident.sym.as_str();
+    if is_safe_global(name) {
+        return None;
+    }
     match name {
-        "Math" | "Date" | "window" | "document" | "console" | "JSON" | 
+        "window" | "document" | "JSON" |
         "localStorage" | "sessionStorage" | "fetch" | "setTimeout" | 
         "setInterval" | "clearTimeout" | "clearInterval" | "alert" | 
-        "confirm" | "prompt" | "Array" | "Object" | "String" | "Number" | 
-        "Boolean" | "RegExp" | "Error" | "Promise" => {
+        "confirm" | "prompt" | "RegExp" | "Error" => {
             Some(format!("Global '{name}' is not available in Manifold expressions. Define this functionality in your Manifold state functions instead."))
         }
         _ => None
