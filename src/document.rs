@@ -691,7 +691,7 @@ mod tests {
             let detail = completions
                 .iter()
                 .find(|c| c.label == label)
-                .unwrap_or_else(|| panic!("missing completion for {}", label));
+                .unwrap_or_else(|| panic!("missing completion for {label}"));
             assert_eq!(detail.detail.as_deref(), Some(expected));
         }
 
@@ -1559,7 +1559,7 @@ impl<'a> TagScanner<'a> {
                 if segment.is_empty() {
                     continue;
                 }
-                let target = segment.split(':').last().map(|s| s.trim()).unwrap_or("");
+                let target = segment.rsplit(':').next().map(|s| s.trim()).unwrap_or("");
                 if target.is_empty() || !Self::is_valid_identifier(target) {
                     continue;
                 }

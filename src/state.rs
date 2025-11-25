@@ -2136,12 +2136,12 @@ fn infer_type_from_ts_type(ts_type: &ast::TsType) -> Option<TypeInfo> {
                     Some(TypeInfo::Set(Box::new(inner)))
                 }
                 "Map" | "ReadonlyMap" => {
-                    let key = generic_args.get(0).cloned().unwrap_or(TypeInfo::Any);
+                    let key = generic_args.first().cloned().unwrap_or(TypeInfo::Any);
                     let value = generic_args.get(1).cloned().unwrap_or(TypeInfo::Any);
                     Some(TypeInfo::Map(Box::new(key), Box::new(value)))
                 }
                 "Record" => {
-                    let key = generic_args.get(0).cloned().unwrap_or(TypeInfo::String);
+                    let key = generic_args.first().cloned().unwrap_or(TypeInfo::String);
                     let value = generic_args.get(1).cloned().unwrap_or(TypeInfo::Any);
                     Some(TypeInfo::Map(Box::new(key), Box::new(value)))
                 }
