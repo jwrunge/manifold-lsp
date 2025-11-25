@@ -1,0 +1,60 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Manifold HTML",
+  "scopeName": "text.html.manifold",
+  "patterns": [
+    {
+      "include": "#manifold-directives"
+    },
+    {
+      "include": "text.html.basic"
+    }
+  ],
+  "repository": {
+    "manifold-directives": {
+      "patterns": [
+        {
+          "name": "meta.attribute.manifold.directive",
+          "match": "\\s+(:[a-z-]+)(?:=([\"']).*?\\2)?",
+          "captures": {
+            "1": {
+              "name": "entity.other.attribute-name.manifold keyword.control.manifold"
+            }
+          }
+        },
+        {
+          "name": "meta.attribute.manifold.data",
+          "match": "\\s+(data-mf-[a-z-]+)(?:=([\"']).*?\\2)?",
+          "captures": {
+            "1": {
+              "name": "entity.other.attribute-name.manifold keyword.other.manifold"
+            }
+          }
+        },
+        {
+          "name": "meta.embedded.block.manifold.script",
+          "begin": "(<script)\\s+(lang=[\"']ts[\"'])",
+          "beginCaptures": {
+            "1": {
+              "name": "punctuation.definition.tag.begin.html"
+            },
+            "2": {
+              "name": "entity.other.attribute-name.html"
+            }
+          },
+          "end": "(</script>)",
+          "endCaptures": {
+            "1": {
+              "name": "punctuation.definition.tag.end.html"
+            }
+          },
+          "patterns": [
+            {
+              "include": "source.ts"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

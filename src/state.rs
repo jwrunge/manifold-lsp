@@ -12,8 +12,8 @@ use swc_common::{
 };
 use swc_ecma_ast::EsVersion;
 use swc_ecma_ast::{
-    self as ast, ArrayLit, Callee, Expr, ExprOrSpread, Ident, KeyValueProp, Lit, MemberExpr,
-    MemberProp, Module, ModuleItem, ObjectLit, Prop, PropName, PropOrSpread,
+    self as ast, ArrayLit, BindingIdent, Callee, Expr, ExprOrSpread, Ident, KeyValueProp, Lit,
+    MemberExpr, MemberProp, Module, ModuleItem, ObjectLit, Pat, Prop, PropName, PropOrSpread,
 };
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsConfig};
 
@@ -188,6 +188,8 @@ pub struct DefinitionLocation {
 }
 
 pub type DefinitionIndex = HashMap<(String, String), DefinitionLocation>;
+
+type BindingMap<'a> = HashMap<String, &'a Expr>;
 
 #[derive(Clone)]
 struct FileHandle {
@@ -372,8 +374,9 @@ pub fn build_definition_index(
         if let Some(module) = parse_script_module(script) {
             // Collect property names per state
             let mut defs = Vec::<(String, PropertyDefinition)>::new();
+            let bindings = collect_variable_bindings(&module);
             for item in &module.body {
-                if let Some(definition) = analyze_module_item(item) {
+                if let Some(definition) = analyze_module_item(item, &bindings) {
                     let state_name = definition.name.unwrap_or_else(|| "default".to_string());
                     for prop in definition.properties {
                         defs.push((state_name.clone(), prop));
@@ -501,8 +504,9 @@ pub fn build_state_name_index(
         if let Some(module) = parse_script_module(script) {
             // Collect state names
             let mut names: Vec<(String, Option<Span>)> = Vec::new();
+            let bindings = collect_variable_bindings(&module);
             for item in &module.body {
-                if let Some(definition) = analyze_module_item(item) {
+                if let Some(definition) = analyze_module_item(item, &bindings) {
                     if let Some(name) = definition.name {
                         names.push((name, definition.name_span));
                     }
@@ -635,6 +639,65 @@ mod tests {
             build_state_name_index(HTML, Some(Path::new("/virtual/test.html")));
         assert!(unresolved.is_empty());
         assert!(state_map.contains_key("secondary"));
+    }
+
+    #[test]
+    fn add_with_object_literal_registers_properties() {
+        const OBJECT_HTML: &str = r#"
+            <div data-mf-register>
+                <script type="module">
+                    const state = Manifold.create()
+                        .add({ addTodo, markTodoDone })
+                        .build();
+
+                    function addTodo(title) {
+                        console.log(title);
+                    }
+
+                    function markTodoDone(id) {
+                        console.log(id);
+                    }
+                </script>
+            </div>
+        "#;
+        let (states, unresolved) = parse_states_from_document(OBJECT_HTML, None);
+        assert!(unresolved.is_empty());
+        let default = states.get("default").expect("default state");
+        assert!(default.property_type("addTodo").is_some());
+        assert!(default.property_type("markTodoDone").is_some());
+    }
+
+    #[test]
+    fn add_with_object_literal_method_definitions_registers_properties() {
+        const METHOD_HTML: &str = r#"
+            <div data-mf-register>
+                <script type="module">
+                    const state = Manifold.create()
+                        .add({
+                            addTodo(title) {
+                                console.log(title);
+                            },
+                            markTodoDone(id) {
+                                console.log(id);
+                            },
+                            get remaining() {
+                                return 0;
+                            },
+                            set selected(value) {
+                                console.log(value);
+                            }
+                        })
+                        .build();
+                </script>
+            </div>
+        "#;
+        let (states, unresolved) = parse_states_from_document(METHOD_HTML, None);
+        assert!(unresolved.is_empty());
+        let default = states.get("default").expect("default state");
+        assert!(default.property_type("addTodo").is_some());
+        assert!(default.property_type("markTodoDone").is_some());
+        assert!(default.property_type("remaining").is_some());
+        assert!(default.property_type("selected").is_some());
     }
 }
 
@@ -804,8 +867,9 @@ fn find_attribute_value(tag_open: &str, attr: &str) -> Option<String> {
 }
 
 fn process_module_for_states(module: &Module, states: &mut ManifoldStates) {
+    let bindings = collect_variable_bindings(module);
     for item in &module.body {
-        if let Some(definition) = analyze_module_item(item) {
+        if let Some(definition) = analyze_module_item(item, &bindings) {
             let name = definition.name.unwrap_or_else(|| "default".to_string());
             let mut state = states.remove(&name).unwrap_or_else(ManifoldState::new);
             for prop in definition.properties {
@@ -886,8 +950,9 @@ fn harvest_definitions_from_module(
     li: &crate::lineindex::LineIndex,
     index: &mut DefinitionIndex,
 ) {
+    let bindings = collect_variable_bindings(module);
     for item in &module.body {
-        if let Some(definition) = analyze_module_item(item) {
+        if let Some(definition) = analyze_module_item(item, &bindings) {
             let state_name = definition.name.unwrap_or_else(|| "default".to_string());
             for prop in definition.properties {
                 let mut recorded = false;
@@ -943,6 +1008,41 @@ fn harvest_definitions_from_module(
     }
 }
 
+fn collect_variable_bindings<'a>(module: &'a Module) -> BindingMap<'a> {
+    fn register_from_var_decl<'a>(
+        var_decl: &'a ast::VarDecl,
+        bindings: &mut BindingMap<'a>,
+    ) {
+        for declarator in &var_decl.decls {
+            if let (Pat::Ident(BindingIdent { id, .. }), Some(init)) = (
+                &declarator.name,
+                &declarator.init,
+            ) {
+                bindings.insert(id.sym.to_string(), init.as_ref());
+            }
+        }
+    }
+
+    let mut bindings: BindingMap<'a> = HashMap::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl))) => {
+                register_from_var_decl(var_decl, &mut bindings);
+            }
+            ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDecl(
+                swc_ecma_ast::ExportDecl {
+                    decl: swc_ecma_ast::Decl::Var(var_decl),
+                    ..
+                },
+            )) => {
+                register_from_var_decl(var_decl, &mut bindings);
+            }
+            _ => {}
+        }
+    }
+    bindings
+}
+
 fn collect_defs_from_imports(
     module: &Module,
     base: &Path,
@@ -992,8 +1092,9 @@ fn harvest_state_names_from_module(
     li: &crate::lineindex::LineIndex,
     index: &mut HashMap<String, DefinitionLocation>,
 ) {
+    let bindings = collect_variable_bindings(module);
     for item in &module.body {
-        if let Some(definition) = analyze_module_item(item) {
+        if let Some(definition) = analyze_module_item(item, &bindings) {
             if let Some(name) = definition.name {
                 let mut recorded = false;
                 if let Some(span) = definition.name_span {
@@ -1164,7 +1265,7 @@ struct StateDefinition {
     properties: Vec<PropertyDefinition>,
 }
 
-fn analyze_module_item(item: &ModuleItem) -> Option<StateDefinition> {
+fn analyze_module_item<'a>(item: &'a ModuleItem, bindings: &BindingMap<'a>) -> Option<StateDefinition> {
     match item {
         ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl)))
         | ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDecl(
@@ -1175,7 +1276,7 @@ fn analyze_module_item(item: &ModuleItem) -> Option<StateDefinition> {
         )) => {
             for declarator in &var_decl.decls {
                 if let Some(init) = declarator.init.as_ref() {
-                    if let Some(def) = analyze_expression(init.as_ref()) {
+                    if let Some(def) = analyze_expression(init.as_ref(), bindings) {
                         return Some(def);
                     }
                 }
@@ -1183,13 +1284,13 @@ fn analyze_module_item(item: &ModuleItem) -> Option<StateDefinition> {
             None
         }
         ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDefaultExpr(default_expr)) => {
-            analyze_expression(&default_expr.expr)
+            analyze_expression(&default_expr.expr, bindings)
         }
         ModuleItem::Stmt(_) | ModuleItem::ModuleDecl(_) => None,
     }
 }
 
-fn analyze_expression(expr: &Expr) -> Option<StateDefinition> {
+fn analyze_expression<'a>(expr: &'a Expr, bindings: &BindingMap<'a>) -> Option<StateDefinition> {
     if let Expr::Call(call) = expr {
         if let Callee::Expr(callee) = &call.callee {
             if let Expr::Member(member) = &**callee {
@@ -1201,7 +1302,8 @@ fn analyze_expression(expr: &Expr) -> Option<StateDefinition> {
                             definition.name_span = span;
                         }
                     }
-                    collect_chain(&member.obj, &mut definition)?;
+                    let mut visited = HashSet::new();
+                    collect_chain(&member.obj, &mut definition, bindings, &mut visited)?;
                     return Some(definition);
                 }
             }
@@ -1210,7 +1312,12 @@ fn analyze_expression(expr: &Expr) -> Option<StateDefinition> {
     None
 }
 
-fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
+fn collect_chain<'a>(
+    expr: &'a Expr,
+    definition: &mut StateDefinition,
+    bindings: &BindingMap<'a>,
+    visited: &mut HashSet<String>,
+) -> Option<()> {
     match expr {
         Expr::Call(call) => {
             if let Callee::Expr(callee) = &call.callee {
@@ -1233,9 +1340,11 @@ fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
                                         ty,
                                         span,
                                     });
+                                } else if let Expr::Object(obj) = prop_expr.as_ref() {
+                                    collect_properties_from_object_literal(obj, definition);
                                 }
                             }
-                            collect_chain(&member.obj, definition)
+                            collect_chain(&member.obj, definition, bindings, visited)
                         }
                         "create" => {
                             if definition.name.is_none() {
@@ -1251,7 +1360,7 @@ fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
                             }
                             Some(())
                         }
-                        _ => collect_chain(&member.obj, definition),
+                        _ => collect_chain(&member.obj, definition, bindings, visited),
                     }
                 } else {
                     None
@@ -1260,9 +1369,74 @@ fn collect_chain(expr: &Expr, definition: &mut StateDefinition) -> Option<()> {
                 None
             }
         }
-        Expr::Member(member) => collect_chain(&member.obj, definition),
-        Expr::Ident(_) => Some(()),
+        Expr::Member(member) => collect_chain(&member.obj, definition, bindings, visited),
+        Expr::Ident(ident) => {
+            let name = ident.sym.to_string();
+            if !visited.insert(name.clone()) {
+                return Some(());
+            }
+            if let Some(bound) = bindings.get(&name) {
+                collect_chain(bound, definition, bindings, visited)
+            } else {
+                Some(())
+            }
+        }
         _ => Some(()),
+    }
+}
+
+fn collect_properties_from_object_literal(object: &ObjectLit, definition: &mut StateDefinition) {
+    for entry in &object.props {
+        let PropOrSpread::Prop(prop) = entry else {
+            continue;
+        };
+        match &**prop {
+            Prop::KeyValue(KeyValueProp { key, value }) => {
+                if let Some(name) = property_name_from_prop(key) {
+                    let ty = infer_type_from_expr(value).unwrap_or(TypeInfo::Any);
+                    definition.properties.push(PropertyDefinition {
+                        name,
+                        ty,
+                        span: span_from_prop_name(key),
+                    });
+                }
+            }
+            Prop::Shorthand(ident) => {
+                definition.properties.push(PropertyDefinition {
+                    name: ident.sym.to_string(),
+                    ty: TypeInfo::Any,
+                    span: Some(ident.span),
+                });
+            }
+            Prop::Method(method) => {
+                if let Some(name) = property_name_from_prop(&method.key) {
+                    definition.properties.push(PropertyDefinition {
+                        name,
+                        ty: TypeInfo::Any,
+                        span: span_from_prop_name(&method.key).or(Some(method.function.span)),
+                    });
+                }
+            }
+            Prop::Getter(getter) => {
+                if let Some(name) = property_name_from_prop(&getter.key) {
+                    definition.properties.push(PropertyDefinition {
+                        name,
+                        ty: TypeInfo::Any,
+                        span: span_from_prop_name(&getter.key).or(Some(getter.span)),
+                    });
+                }
+            }
+            Prop::Setter(setter) => {
+                if let Some(name) = property_name_from_prop(&setter.key) {
+                    definition.properties.push(PropertyDefinition {
+                        name,
+                        ty: TypeInfo::Any,
+                        span: span_from_prop_name(&setter.key).or(Some(setter.span)),
+                    });
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1351,6 +1525,16 @@ fn property_name_from_prop(name: &PropName) -> Option<String> {
         PropName::Ident(ident) => Some(ident.sym.to_string()),
         PropName::Str(str_lit) => Some(str_lit.value.to_string()),
         _ => None,
+    }
+}
+
+fn span_from_prop_name(name: &PropName) -> Option<Span> {
+    match name {
+        PropName::Ident(ident) => Some(ident.span),
+        PropName::Str(str_lit) => Some(str_lit.span),
+        PropName::Num(num_lit) => Some(num_lit.span),
+        PropName::Computed(comp) => Some(comp.span),
+        PropName::BigInt(big) => Some(big.span),
     }
 }
 
