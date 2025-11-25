@@ -12,7 +12,7 @@ use swc_common::{
 };
 use swc_ecma_ast::EsVersion;
 use swc_ecma_ast::{
-    self as ast, ArrayLit, BindingIdent, Callee, Expr, ExprOrSpread, ExportSpecifier, Ident,
+    self as ast, ArrayLit, BindingIdent, Callee, ExportSpecifier, Expr, ExprOrSpread, Ident,
     ImportSpecifier, KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleExportName,
     ModuleItem, ObjectLit, Pat, Prop, PropName, PropOrSpread,
 };
@@ -28,6 +28,9 @@ pub enum TypeInfo {
     Null,
     Array(Box<TypeInfo>),
     Object(HashMap<String, TypeInfo>),
+    Set(Box<TypeInfo>),
+    Map(Box<TypeInfo>, Box<TypeInfo>),
+    Tuple(Vec<TypeInfo>),
     Promise(Box<TypeInfo>),
     Union(Vec<TypeInfo>),
     Named(String),
@@ -104,6 +107,14 @@ impl TypeInfo {
                     format!("{{ {fields} }}")
                 }
             }
+            TypeInfo::Set(inner) => format!("Set<{}>", inner.describe()),
+            TypeInfo::Map(key, value) => {
+                format!("Map<{}, {}>", key.describe(), value.describe())
+            }
+            TypeInfo::Tuple(items) => {
+                let parts = items.iter().map(|ty| ty.describe()).collect::<Vec<_>>();
+                format!("[{}]", parts.join(", "))
+            }
             TypeInfo::Promise(inner) => format!("Promise<{}>", inner.describe()),
             TypeInfo::Union(types) => {
                 if types.is_empty() {
@@ -123,11 +134,25 @@ impl TypeInfo {
     pub fn element_type(&self) -> TypeInfo {
         match self {
             TypeInfo::Array(inner) => (*inner.clone()).clone(),
+            TypeInfo::Set(inner) => (*inner.clone()).clone(),
+            TypeInfo::Map(key, value) => {
+                TypeInfo::Tuple(vec![(*value.clone()).clone(), (*key.clone()).clone()])
+            }
+            TypeInfo::Object(props) => {
+                let value_union = if props.is_empty() {
+                    TypeInfo::Any
+                } else {
+                    TypeInfo::from_union(props.values().cloned().collect())
+                };
+                TypeInfo::Tuple(vec![value_union, TypeInfo::String])
+            }
+            TypeInfo::Tuple(items) => TypeInfo::Tuple(items.clone()),
             TypeInfo::Union(items) => {
                 let mut collected = Vec::new();
                 for item in items {
-                    if let TypeInfo::Array(inner) = item {
-                        collected.push((*inner.clone()).clone());
+                    let elem = item.element_type();
+                    if !matches!(elem, TypeInfo::Any) {
+                        collected.push(elem);
                     }
                 }
                 if collected.is_empty() {
@@ -392,10 +417,7 @@ pub fn parse_states_from_document(
                             None => continue,
                         };
                         let base_dir = handle.path.parent().map(Path::to_path_buf);
-                        let env = ModuleEnv {
-                            context,
-                            base_dir,
-                        };
+                        let env = ModuleEnv { context, base_dir };
                         process_module_for_states(
                             module.as_ref(),
                             env.clone(),
@@ -860,11 +882,34 @@ pub fn resolve_identifier_type(
 pub fn resolve_member_type(current: &TypeInfo, segment: &str) -> TypeInfo {
     match current {
         TypeInfo::Object(props) => props.get(segment).cloned().unwrap_or(TypeInfo::Any),
+        TypeInfo::Set(_) => {
+            if segment == "size" {
+                TypeInfo::Number
+            } else {
+                TypeInfo::Any
+            }
+        }
+        TypeInfo::Map(_, _) => {
+            if segment == "size" {
+                TypeInfo::Number
+            } else {
+                TypeInfo::Any
+            }
+        }
         TypeInfo::Array(inner) => {
             if segment == "length" {
                 TypeInfo::Number
             } else {
                 (*inner.clone()).clone()
+            }
+        }
+        TypeInfo::Tuple(items) => {
+            if segment == "length" {
+                TypeInfo::Number
+            } else if let Ok(index) = segment.parse::<usize>() {
+                items.get(index).cloned().unwrap_or(TypeInfo::Any)
+            } else {
+                TypeInfo::Any
             }
         }
         TypeInfo::Union(options) => {
@@ -995,9 +1040,7 @@ fn process_module_for_states(
     unresolved: &mut Vec<String>,
 ) {
     for item in &module.body {
-        if let Some(definition) =
-            analyze_module_item_with_env(item, &env, file_cache, unresolved)
-        {
+        if let Some(definition) = analyze_module_item_with_env(item, &env, file_cache, unresolved) {
             let name = definition.name.unwrap_or_else(|| "default".to_string());
             let mut state = states.remove(&name).unwrap_or_else(ManifoldState::new);
             for prop in definition.properties {
@@ -1341,10 +1384,7 @@ fn resolve_import_binding(
     }?;
 
     let base_dir = handle.path.parent().map(Path::to_path_buf);
-    let env = ModuleEnv {
-        context,
-        base_dir,
-    };
+    let env = ModuleEnv { context, base_dir };
 
     Some((expr, env))
 }
@@ -2090,6 +2130,20 @@ fn infer_type_from_ts_type(ts_type: &ast::TsType) -> Option<TypeInfo> {
                 "Array" | "ReadonlyArray" => {
                     let inner = generic_args.first().cloned().unwrap_or(TypeInfo::Any);
                     Some(TypeInfo::Array(Box::new(inner)))
+                }
+                "Set" | "ReadonlySet" => {
+                    let inner = generic_args.first().cloned().unwrap_or(TypeInfo::Any);
+                    Some(TypeInfo::Set(Box::new(inner)))
+                }
+                "Map" | "ReadonlyMap" => {
+                    let key = generic_args.get(0).cloned().unwrap_or(TypeInfo::Any);
+                    let value = generic_args.get(1).cloned().unwrap_or(TypeInfo::Any);
+                    Some(TypeInfo::Map(Box::new(key), Box::new(value)))
+                }
+                "Record" => {
+                    let key = generic_args.get(0).cloned().unwrap_or(TypeInfo::String);
+                    let value = generic_args.get(1).cloned().unwrap_or(TypeInfo::Any);
+                    Some(TypeInfo::Map(Box::new(key), Box::new(value)))
                 }
                 _ => {
                     if generic_args.is_empty() {

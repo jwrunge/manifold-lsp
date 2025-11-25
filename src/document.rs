@@ -492,6 +492,35 @@ mod tests {
         </script>
     "#;
 
+    const COLLECTION_EACH_HTML: &str = r#"
+        <div data-mf-register>
+            <ul>
+                <li :each="setEntries as [setValue, setIndex]">
+                    ${setValue}-${setIndex}
+                </li>
+                <li :each="mapEntries as mapValue, mapKey">
+                    ${mapValue.label}-${mapKey.toUpperCase()}
+                </li>
+                <li :each="mapEntries as [entry, tupleKey]">
+                    ${entry.label}-${tupleKey}
+                </li>
+                <li :each="recordEntries as { active }, recordKey">
+                    ${recordKey}-${active}
+                </li>
+            </ul>
+        </div>
+        <script type="module">
+            const state = Manifold.create()
+                .add("setEntries", null as Set<number>)
+                .add("mapEntries", null as Map<string, { label: string }>)
+                .add("recordEntries", {
+                    first: { active: true },
+                    second: { active: false },
+                })
+                .build();
+        </script>
+    "#;
+
     fn position_in(doc: &ManifoldDocument, needle: &str, relative: usize) -> Position {
         let start = doc
             .text
@@ -642,6 +671,44 @@ mod tests {
             .find(|c| c.label == "msg")
             .expect("msg completion present");
         assert_eq!(msg.detail.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn each_infers_types_for_sets_maps_and_objects() {
+        let document = ManifoldDocument::parse(COLLECTION_EACH_HTML);
+
+        fn expect_detail(
+            document: &ManifoldDocument,
+            needle: &str,
+            relative: usize,
+            label: &str,
+            expected: &str,
+        ) {
+            let position = position_in(document, needle, relative);
+            let completions = document
+                .completion_candidates(&position)
+                .expect("expected completions in :each block");
+            let detail = completions
+                .iter()
+                .find(|c| c.label == label)
+                .unwrap_or_else(|| panic!("missing completion for {}", label));
+            assert_eq!(detail.detail.as_deref(), Some(expected));
+        }
+
+        expect_detail(&document, "${setValue}", 3, "setValue", "number");
+        expect_detail(&document, "${setIndex}", 3, "setIndex", "number");
+        expect_detail(
+            &document,
+            "${mapValue.label}",
+            3,
+            "mapValue",
+            "{ label: string }",
+        );
+        expect_detail(&document, "${mapKey.toUpperCase()}", 3, "mapKey", "string");
+        expect_detail(&document, "${entry.label}", 3, "entry", "{ label: string }");
+        expect_detail(&document, "${tupleKey}", 3, "tupleKey", "string");
+        expect_detail(&document, "${recordKey}-${active}", 3, "recordKey", "string");
+        expect_detail(&document, "-${active}", 3, "active", "boolean");
     }
 
     #[test]
@@ -1309,10 +1376,23 @@ impl<'a> TagScanner<'a> {
         let collection_type = TagScanner::infer_collection_literal_type(collection)
             .or_else(|| resolve_identifier_type(collection, state, locals))
             .unwrap_or(TypeInfo::Any);
-        let element_type = collection_type.element_type();
+        let mut element_type = collection_type.element_type();
+        let value_type = Self::infer_each_value_type(&collection_type);
+        let mut binding_type = value_type.clone();
+        if Self::is_array_pattern(item_part) {
+            if !matches!(element_type, TypeInfo::Tuple(_)) {
+                let index_ty = Self::infer_each_index_type(&collection_type);
+                element_type = TypeInfo::Tuple(vec![value_type.clone(), index_ty]);
+            }
+            binding_type = element_type.clone();
+        }
 
         let fallback_any = TypeInfo::Any;
-        let items = Self::extract_pattern_bindings(item_part, Some(&element_type), &fallback_any);
+        let items = Self::extract_pattern_bindings(
+            item_part,
+            Some(&binding_type),
+            &fallback_any,
+        );
 
         if items.is_empty() {
             return None;
@@ -1323,9 +1403,10 @@ impl<'a> TagScanner<'a> {
             if trimmed.is_empty() || !Self::is_valid_identifier(trimmed) {
                 None
             } else {
+                let index_ty = Self::infer_each_index_type(&collection_type);
                 Some(StateVariable {
                     name: trimmed.to_string(),
-                    ty: TypeInfo::Number,
+                    ty: index_ty,
                 })
             }
         });
@@ -1462,6 +1543,37 @@ impl<'a> TagScanner<'a> {
                     ty: property_type,
                 });
             }
+        } else if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let inner = &trimmed[1..trimmed.len().saturating_sub(1)];
+            let segments = Self::split_array_elements(inner);
+            for (idx, segment) in segments.into_iter().enumerate() {
+                let mut segment = segment.trim();
+                if segment.is_empty() || segment.starts_with("...") {
+                    continue;
+                }
+                if let Some(eq_idx) = segment.find('=') {
+                    segment = segment[..eq_idx].trim();
+                }
+                if segment.is_empty() {
+                    continue;
+                }
+                let target = segment
+                    .split(':')
+                    .last()
+                    .map(|s| s.trim())
+                    .unwrap_or("");
+                if target.is_empty() || !Self::is_valid_identifier(target) {
+                    continue;
+                }
+
+                let ty = base_type
+                    .and_then(|base| Self::array_pattern_element_type(base, idx))
+                    .unwrap_or_else(|| (*fallback).clone());
+                results.push(StateVariable {
+                    name: target.to_string(),
+                    ty,
+                });
+            }
         } else if Self::is_valid_identifier(trimmed) {
             let ty = base_type.cloned().unwrap_or_else(|| (*fallback).clone());
             results.push(StateVariable {
@@ -1471,6 +1583,73 @@ impl<'a> TagScanner<'a> {
         }
 
         results
+    }
+
+    fn is_array_pattern(text: &str) -> bool {
+        let trimmed = text.trim();
+        trimmed.starts_with('[') && trimmed.ends_with(']')
+    }
+
+    fn split_array_elements(inner: &str) -> Vec<String> {
+        let mut segments = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0;
+        for (idx, ch) in inner.char_indices() {
+            match ch {
+                '[' | '{' | '(' => depth += 1,
+                ']' | '}' | ')' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                ',' if depth == 0 => {
+                    segments.push(inner[start..idx].to_string());
+                    start = idx + 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if start < inner.len() {
+            segments.push(inner[start..].to_string());
+        }
+        segments
+    }
+
+    fn array_pattern_element_type(base: &TypeInfo, index: usize) -> Option<TypeInfo> {
+        match base {
+            TypeInfo::Tuple(items) => items.get(index).cloned(),
+            TypeInfo::Array(inner) => {
+                if index == 0 {
+                    Some((**inner).clone())
+                } else {
+                    None
+                }
+            }
+            TypeInfo::Set(inner) => {
+                if index == 0 {
+                    Some((**inner).clone())
+                } else {
+                    None
+                }
+            }
+            TypeInfo::Union(options) => {
+                let mut collected = Vec::new();
+                for option in options {
+                    if let Some(ty) = Self::array_pattern_element_type(option, index) {
+                        collected.push(ty);
+                    }
+                }
+                if collected.is_empty() {
+                    None
+                } else if collected.iter().all(|ty| ty == &collected[0]) {
+                    Some(collected[0].clone())
+                } else {
+                    Some(TypeInfo::Any)
+                }
+            }
+            _ => None,
+        }
     }
 
     fn normalize_property_key(source: &str) -> String {
@@ -1538,6 +1717,45 @@ impl<'a> TagScanner<'a> {
         }
 
         (bindings.trim(), None)
+    }
+
+    fn infer_each_index_type(collection_type: &TypeInfo) -> TypeInfo {
+        match collection_type {
+            TypeInfo::Map(key, _) => (*key.clone()).clone(),
+            TypeInfo::Object(_) => TypeInfo::String,
+            TypeInfo::Union(options) => {
+                let mut collected = Vec::new();
+                for option in options {
+                    collected.push(Self::infer_each_index_type(option));
+                }
+                TypeInfo::from_union(collected)
+            }
+            _ => TypeInfo::Number,
+        }
+    }
+
+    fn infer_each_value_type(collection_type: &TypeInfo) -> TypeInfo {
+        match collection_type {
+            TypeInfo::Array(inner) | TypeInfo::Set(inner) => (**inner).clone(),
+            TypeInfo::Map(_, value) => (**value).clone(),
+            TypeInfo::Object(props) => {
+                if props.is_empty() {
+                    TypeInfo::Any
+                } else {
+                    TypeInfo::from_union(props.values().cloned().collect())
+                }
+            }
+            TypeInfo::Tuple(items) => items.first().cloned().unwrap_or(TypeInfo::Any),
+            TypeInfo::Union(options) => {
+                let mut collected = Vec::new();
+                for option in options {
+                    collected.push(Self::infer_each_value_type(option));
+                }
+                TypeInfo::from_union(collected)
+            }
+            TypeInfo::Promise(inner) => Self::infer_each_value_type(inner),
+            _ => TypeInfo::Any,
+        }
     }
 
     fn is_valid_identifier(name: &str) -> bool {
