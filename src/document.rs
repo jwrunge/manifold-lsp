@@ -707,7 +707,13 @@ mod tests {
         expect_detail(&document, "${mapKey.toUpperCase()}", 3, "mapKey", "string");
         expect_detail(&document, "${entry.label}", 3, "entry", "{ label: string }");
         expect_detail(&document, "${tupleKey}", 3, "tupleKey", "string");
-        expect_detail(&document, "${recordKey}-${active}", 3, "recordKey", "string");
+        expect_detail(
+            &document,
+            "${recordKey}-${active}",
+            3,
+            "recordKey",
+            "string",
+        );
         expect_detail(&document, "-${active}", 3, "active", "boolean");
     }
 
@@ -1388,11 +1394,7 @@ impl<'a> TagScanner<'a> {
         }
 
         let fallback_any = TypeInfo::Any;
-        let items = Self::extract_pattern_bindings(
-            item_part,
-            Some(&binding_type),
-            &fallback_any,
-        );
+        let items = Self::extract_pattern_bindings(item_part, Some(&binding_type), &fallback_any);
 
         if items.is_empty() {
             return None;
@@ -1557,11 +1559,7 @@ impl<'a> TagScanner<'a> {
                 if segment.is_empty() {
                     continue;
                 }
-                let target = segment
-                    .split(':')
-                    .last()
-                    .map(|s| s.trim())
-                    .unwrap_or("");
+                let target = segment.split(':').last().map(|s| s.trim()).unwrap_or("");
                 if target.is_empty() || !Self::is_valid_identifier(target) {
                     continue;
                 }
