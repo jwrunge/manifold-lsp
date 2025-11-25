@@ -12,8 +12,9 @@ use swc_common::{
 };
 use swc_ecma_ast::EsVersion;
 use swc_ecma_ast::{
-    self as ast, ArrayLit, BindingIdent, Callee, Expr, ExprOrSpread, Ident, KeyValueProp, Lit,
-    MemberExpr, MemberProp, Module, ModuleItem, ObjectLit, Pat, Prop, PropName, PropOrSpread,
+    self as ast, ArrayLit, BindingIdent, Callee, Expr, ExprOrSpread, ExportSpecifier, Ident,
+    ImportSpecifier, KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleExportName,
+    ModuleItem, ObjectLit, Pat, Prop, PropName, PropOrSpread,
 };
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsConfig};
 
@@ -188,8 +189,34 @@ pub struct DefinitionLocation {
 }
 
 pub type DefinitionIndex = HashMap<(String, String), DefinitionLocation>;
+type BindingMap = HashMap<String, Arc<Expr>>;
 
-type BindingMap<'a> = HashMap<String, &'a Expr>;
+#[derive(Clone)]
+struct ImportBinding {
+    specifier: String,
+    kind: ImportKind,
+}
+
+#[derive(Clone)]
+enum ImportKind {
+    Default,
+    Named(String),
+}
+
+#[derive(Default, Clone)]
+struct ModuleContext {
+    id: usize,
+    bindings: BindingMap,
+    imports: HashMap<String, ImportBinding>,
+    exports: HashMap<String, Arc<Expr>>,
+    default_export: Option<Arc<Expr>>,
+}
+
+#[derive(Clone)]
+struct ModuleEnv {
+    context: Arc<ModuleContext>,
+    base_dir: Option<PathBuf>,
+}
 
 #[derive(Clone)]
 struct FileHandle {
@@ -213,6 +240,7 @@ impl FileHandle {
 struct CachedFile {
     handle: FileHandle,
     module: Option<Arc<Module>>,
+    context: Option<Arc<ModuleContext>>,
 }
 
 impl CachedFile {
@@ -220,6 +248,7 @@ impl CachedFile {
         Self {
             handle: FileHandle::new(path, content),
             module: None,
+            context: None,
         }
     }
 }
@@ -287,6 +316,27 @@ impl FileCache {
         }
         None
     }
+
+    fn ensure_context(&mut self, path: &Path) -> Option<Arc<ModuleContext>> {
+        if let Some(entry) = self.files.get_mut(path) {
+            if let Some(context) = &entry.context {
+                return Some(context.clone());
+            }
+            let module = entry.module.clone().or_else(|| {
+                if let Some(parsed) = parse_script_module(&entry.handle.content) {
+                    let arc = Arc::new(parsed);
+                    entry.module = Some(arc.clone());
+                    Some(arc)
+                } else {
+                    None
+                }
+            })?;
+            let context = Arc::new(collect_module_context(module.as_ref()));
+            entry.context = Some(context.clone());
+            return Some(context);
+        }
+        None
+    }
 }
 
 pub fn parse_states_from_document(
@@ -305,11 +355,22 @@ pub fn parse_states_from_document(
     // Parse inline scripts, follow imports
     for script in inline_scripts {
         if let Some(module) = parse_script_module(&script) {
-            process_module_for_states(&module, &mut states);
-            if let Some(base) = base {
+            let context = Arc::new(collect_module_context(&module));
+            let env = ModuleEnv {
+                context,
+                base_dir: base.map(Path::to_path_buf),
+            };
+            process_module_for_states(
+                &module,
+                env.clone(),
+                &mut states,
+                &mut file_cache,
+                &mut unresolved,
+            );
+            if base.is_some() {
                 follow_imports(
                     &module,
-                    base,
+                    &env,
                     &mut states,
                     &mut visited,
                     &mut unresolved,
@@ -326,11 +387,25 @@ pub fn parse_states_from_document(
             if let Some(handle) = file_cache.resolve_script(&src, base) {
                 if visited.insert(handle.path.clone()) {
                     if let Some(module) = file_cache.ensure_module(&handle.path) {
-                        process_module_for_states(module.as_ref(), &mut states);
-                        let next_base = handle.path.parent().unwrap_or(base);
+                        let context = match file_cache.ensure_context(&handle.path) {
+                            Some(ctx) => ctx,
+                            None => continue,
+                        };
+                        let base_dir = handle.path.parent().map(Path::to_path_buf);
+                        let env = ModuleEnv {
+                            context,
+                            base_dir,
+                        };
+                        process_module_for_states(
+                            module.as_ref(),
+                            env.clone(),
+                            &mut states,
+                            &mut file_cache,
+                            &mut unresolved,
+                        );
                         follow_imports(
                             module.as_ref(),
-                            next_base,
+                            &env,
                             &mut states,
                             &mut visited,
                             &mut unresolved,
@@ -699,6 +774,52 @@ mod tests {
         assert!(default.property_type("remaining").is_some());
         assert!(default.property_type("selected").is_some());
     }
+
+    #[test]
+    fn builder_split_across_modules_registers_properties() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let builder_js = dir.path().join("builder.js");
+        let entry_js = dir.path().join("entry.js");
+
+        fs::write(
+            &builder_js,
+            r#"
+                const builder = Manifold
+                    .create()
+                    .add("todos", [])
+                    .add("addTodo", () => {})
+                    .add("markTodoDone", () => {});
+
+                export default builder;
+            "#,
+        )
+        .expect("write builder");
+
+        fs::write(
+            &entry_js,
+            r#"
+                import builder from "./builder.js";
+
+                const state = builder.build();
+                export default state;
+            "#,
+        )
+        .expect("write entry");
+
+        const HTML: &str = r#"
+            <div data-mf-register>
+                <script type="module" src="./entry.js"></script>
+                <button :onclick="addTodo('x')">Add</button>
+            </div>
+        "#;
+
+        let (states, unresolved) = parse_states_from_document(HTML, Some(dir.path()));
+        assert!(unresolved.is_empty());
+        let default = states.get("default").expect("default");
+        assert!(default.property_type("todos").is_some());
+        assert!(default.property_type("addTodo").is_some());
+        assert!(default.property_type("markTodoDone").is_some());
+    }
 }
 
 fn find_create_call(content: &str, name: &str) -> Option<usize> {
@@ -866,10 +987,17 @@ fn find_attribute_value(tag_open: &str, attr: &str) -> Option<String> {
     None
 }
 
-fn process_module_for_states(module: &Module, states: &mut ManifoldStates) {
-    let bindings = collect_variable_bindings(module);
+fn process_module_for_states(
+    module: &Module,
+    env: ModuleEnv,
+    states: &mut ManifoldStates,
+    file_cache: &mut FileCache,
+    unresolved: &mut Vec<String>,
+) {
     for item in &module.body {
-        if let Some(definition) = analyze_module_item(item, &bindings) {
+        if let Some(definition) =
+            analyze_module_item_with_env(item, &env, file_cache, unresolved)
+        {
             let name = definition.name.unwrap_or_else(|| "default".to_string());
             let mut state = states.remove(&name).unwrap_or_else(ManifoldState::new);
             for prop in definition.properties {
@@ -882,7 +1010,7 @@ fn process_module_for_states(module: &Module, states: &mut ManifoldStates) {
 
 fn follow_imports(
     module: &Module,
-    base: &Path,
+    env: &ModuleEnv,
     states: &mut ManifoldStates,
     visited: &mut HashSet<PathBuf>,
     unresolved: &mut Vec<String>,
@@ -893,15 +1021,37 @@ fn follow_imports(
         return; // reasonable safety cap
     }
     let imports = collect_import_paths(module);
+    let Some(base) = env.base_dir.as_deref() else {
+        unresolved.extend(imports);
+        return;
+    };
     for import in imports {
         if let Some(handle) = cache.resolve_script(&import, base) {
             if visited.insert(handle.path.clone()) {
                 if let Some(child) = cache.ensure_module(&handle.path) {
-                    process_module_for_states(child.as_ref(), states);
-                    let next_base = handle.path.parent().unwrap_or(base);
+                    let context = match cache.ensure_context(&handle.path) {
+                        Some(ctx) => ctx,
+                        None => continue,
+                    };
+                    let next_base = handle
+                        .path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .or_else(|| env.base_dir.clone());
+                    let child_env = ModuleEnv {
+                        context,
+                        base_dir: next_base,
+                    };
+                    process_module_for_states(
+                        child.as_ref(),
+                        child_env.clone(),
+                        states,
+                        cache,
+                        unresolved,
+                    );
                     follow_imports(
                         child.as_ref(),
-                        next_base,
+                        &child_env,
                         states,
                         visited,
                         unresolved,
@@ -1008,22 +1158,18 @@ fn harvest_definitions_from_module(
     }
 }
 
-fn collect_variable_bindings<'a>(module: &'a Module) -> BindingMap<'a> {
-    fn register_from_var_decl<'a>(
-        var_decl: &'a ast::VarDecl,
-        bindings: &mut BindingMap<'a>,
-    ) {
+fn collect_variable_bindings(module: &Module) -> BindingMap {
+    fn register_from_var_decl(var_decl: &ast::VarDecl, bindings: &mut BindingMap) {
         for declarator in &var_decl.decls {
-            if let (Pat::Ident(BindingIdent { id, .. }), Some(init)) = (
-                &declarator.name,
-                &declarator.init,
-            ) {
-                bindings.insert(id.sym.to_string(), init.as_ref());
+            if let (Pat::Ident(BindingIdent { id, .. }), Some(init)) =
+                (&declarator.name, &declarator.init)
+            {
+                bindings.insert(id.sym.to_string(), Arc::new((**init).clone()));
             }
         }
     }
 
-    let mut bindings: BindingMap<'a> = HashMap::new();
+    let mut bindings: BindingMap = HashMap::new();
     for item in &module.body {
         match item {
             ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl))) => {
@@ -1041,6 +1187,166 @@ fn collect_variable_bindings<'a>(module: &'a Module) -> BindingMap<'a> {
         }
     }
     bindings
+}
+
+fn collect_module_context(module: &Module) -> ModuleContext {
+    let bindings = collect_variable_bindings(module);
+    let imports = collect_import_bindings(module);
+    let (exports, default_export) = collect_export_bindings(module, &bindings);
+
+    ModuleContext {
+        id: module as *const Module as usize,
+        bindings,
+        imports,
+        exports,
+        default_export,
+    }
+}
+
+fn collect_import_bindings(module: &Module) -> HashMap<String, ImportBinding> {
+    let mut imports = HashMap::new();
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::Import(import)) = item {
+            for specifier in &import.specifiers {
+                match specifier {
+                    ImportSpecifier::Default(default_spec) => {
+                        imports.insert(
+                            default_spec.local.sym.to_string(),
+                            ImportBinding {
+                                specifier: import.src.value.to_string(),
+                                kind: ImportKind::Default,
+                            },
+                        );
+                    }
+                    ImportSpecifier::Named(named_spec) => {
+                        let imported = named_spec
+                            .imported
+                            .as_ref()
+                            .map(|name| match name {
+                                ModuleExportName::Ident(ident) => ident.sym.to_string(),
+                                ModuleExportName::Str(str_lit) => str_lit.value.to_string(),
+                            })
+                            .unwrap_or_else(|| named_spec.local.sym.to_string());
+                        imports.insert(
+                            named_spec.local.sym.to_string(),
+                            ImportBinding {
+                                specifier: import.src.value.to_string(),
+                                kind: ImportKind::Named(imported),
+                            },
+                        );
+                    }
+                    ImportSpecifier::Namespace(_) => {
+                        // Namespace imports are not yet resolved for builder chains
+                    }
+                }
+            }
+        }
+    }
+    imports
+}
+
+fn collect_export_bindings(
+    module: &Module,
+    bindings: &BindingMap,
+) -> (HashMap<String, Arc<Expr>>, Option<Arc<Expr>>) {
+    let mut exports = HashMap::new();
+    let mut default_export: Option<Arc<Expr>> = None;
+
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(decl) = item {
+            match decl {
+                swc_ecma_ast::ModuleDecl::ExportDecl(export_decl) => {
+                    if let swc_ecma_ast::Decl::Var(var_decl) = &export_decl.decl {
+                        for declarator in &var_decl.decls {
+                            if let Pat::Ident(BindingIdent { id, .. }) = &declarator.name {
+                                if let Some(expr) = bindings.get(&id.sym.to_string()) {
+                                    exports.insert(id.sym.to_string(), expr.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                swc_ecma_ast::ModuleDecl::ExportNamed(named) => {
+                    if named.src.is_none() {
+                        for specifier in &named.specifiers {
+                            if let ExportSpecifier::Named(named_spec) = specifier {
+                                let exported_name = named_spec
+                                    .exported
+                                    .as_ref()
+                                    .map(|name| match name {
+                                        ModuleExportName::Ident(ident) => ident.sym.to_string(),
+                                        ModuleExportName::Str(str_lit) => str_lit.value.to_string(),
+                                    })
+                                    .unwrap_or_else(|| match &named_spec.orig {
+                                        ModuleExportName::Ident(ident) => ident.sym.to_string(),
+                                        ModuleExportName::Str(str_lit) => str_lit.value.to_string(),
+                                    });
+                                let local_name = match &named_spec.orig {
+                                    ModuleExportName::Ident(ident) => ident.sym.to_string(),
+                                    ModuleExportName::Str(str_lit) => str_lit.value.to_string(),
+                                };
+                                if let Some(expr) = bindings.get(&local_name) {
+                                    exports.insert(exported_name, expr.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                swc_ecma_ast::ModuleDecl::ExportDefaultExpr(default_expr) => {
+                    default_export = resolve_export_expression(&default_expr.expr, bindings);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (exports, default_export)
+}
+
+fn resolve_export_expression(expr: &Expr, bindings: &BindingMap) -> Option<Arc<Expr>> {
+    match expr {
+        Expr::Ident(ident) => bindings.get(&ident.sym.to_string()).cloned(),
+        _ => Some(Arc::new(expr.clone())),
+    }
+}
+
+fn resolve_import_binding(
+    current_env: &ModuleEnv,
+    binding: &ImportBinding,
+    file_cache: &mut FileCache,
+    unresolved: &mut Vec<String>,
+) -> Option<(Arc<Expr>, ModuleEnv)> {
+    let base = match current_env.base_dir.as_deref() {
+        Some(base) => base,
+        None => {
+            unresolved.push(binding.specifier.clone());
+            return None;
+        }
+    };
+
+    let handle = match file_cache.resolve_script(&binding.specifier, base) {
+        Some(handle) => handle,
+        None => {
+            unresolved.push(binding.specifier.clone());
+            return None;
+        }
+    };
+
+    file_cache.ensure_module(&handle.path)?;
+    let context = file_cache.ensure_context(&handle.path)?;
+
+    let expr = match &binding.kind {
+        ImportKind::Default => context.default_export.clone(),
+        ImportKind::Named(name) => context.exports.get(name).cloned(),
+    }?;
+
+    let base_dir = handle.path.parent().map(Path::to_path_buf);
+    let env = ModuleEnv {
+        context,
+        base_dir,
+    };
+
+    Some((expr, env))
 }
 
 fn collect_defs_from_imports(
@@ -1265,7 +1571,192 @@ struct StateDefinition {
     properties: Vec<PropertyDefinition>,
 }
 
-fn analyze_module_item<'a>(item: &'a ModuleItem, bindings: &BindingMap<'a>) -> Option<StateDefinition> {
+fn analyze_module_item_with_env(
+    item: &ModuleItem,
+    env: &ModuleEnv,
+    file_cache: &mut FileCache,
+    unresolved: &mut Vec<String>,
+) -> Option<StateDefinition> {
+    match item {
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl)))
+        | ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDecl(
+            swc_ecma_ast::ExportDecl {
+                decl: swc_ecma_ast::Decl::Var(var_decl),
+                ..
+            },
+        )) => {
+            for declarator in &var_decl.decls {
+                if let Some(init) = declarator.init.as_ref() {
+                    if let Some(def) =
+                        analyze_expression_with_env(init.as_ref(), env, file_cache, unresolved)
+                    {
+                        return Some(def);
+                    }
+                }
+            }
+            None
+        }
+        ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDefaultExpr(default_expr)) => {
+            analyze_expression_with_env(&default_expr.expr, env, file_cache, unresolved)
+        }
+        ModuleItem::Stmt(_) | ModuleItem::ModuleDecl(_) => None,
+    }
+}
+
+fn analyze_expression_with_env(
+    expr: &Expr,
+    env: &ModuleEnv,
+    file_cache: &mut FileCache,
+    unresolved: &mut Vec<String>,
+) -> Option<StateDefinition> {
+    if let Expr::Call(call) = expr {
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Member(member) = &**callee {
+                if property_name(member)? == "build" {
+                    let mut definition = StateDefinition::default();
+                    if let Some(arg) = call.args.first() {
+                        if let Some((name, span)) = string_from_expr(&arg.expr) {
+                            definition.name = Some(name);
+                            definition.name_span = span;
+                        }
+                    }
+                    let mut visited = HashSet::new();
+                    collect_chain_with_env(
+                        &member.obj,
+                        &mut definition,
+                        env,
+                        file_cache,
+                        unresolved,
+                        &mut visited,
+                    )?;
+                    return Some(definition);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn collect_chain_with_env(
+    expr: &Expr,
+    definition: &mut StateDefinition,
+    env: &ModuleEnv,
+    file_cache: &mut FileCache,
+    unresolved: &mut Vec<String>,
+    visited: &mut HashSet<(usize, String)>,
+) -> Option<()> {
+    match expr {
+        Expr::Call(call) => {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Member(member) = &**callee {
+                    let method = property_name(member)?;
+                    match method.as_str() {
+                        "add" => {
+                            if let Some(ExprOrSpread {
+                                expr: prop_expr, ..
+                            }) = call.args.first()
+                            {
+                                if let Some((prop_name, span)) = string_from_expr(prop_expr) {
+                                    let ty = call
+                                        .args
+                                        .get(1)
+                                        .and_then(|arg| infer_type_from_expr(&arg.expr))
+                                        .unwrap_or(TypeInfo::Any);
+                                    definition.properties.push(PropertyDefinition {
+                                        name: prop_name,
+                                        ty,
+                                        span,
+                                    });
+                                } else if let Expr::Object(obj) = prop_expr.as_ref() {
+                                    collect_properties_from_object_literal(obj, definition);
+                                }
+                            }
+                            collect_chain_with_env(
+                                &member.obj,
+                                definition,
+                                env,
+                                file_cache,
+                                unresolved,
+                                visited,
+                            )
+                        }
+                        "create" => {
+                            if definition.name.is_none() {
+                                if let Some(ExprOrSpread {
+                                    expr: name_expr, ..
+                                }) = call.args.first()
+                                {
+                                    if let Some((name, span)) = string_from_expr(name_expr) {
+                                        definition.name = Some(name);
+                                        definition.name_span = span;
+                                    }
+                                }
+                            }
+                            Some(())
+                        }
+                        _ => collect_chain_with_env(
+                            &member.obj,
+                            definition,
+                            env,
+                            file_cache,
+                            unresolved,
+                            visited,
+                        ),
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        Expr::Member(member) => collect_chain_with_env(
+            &member.obj,
+            definition,
+            env,
+            file_cache,
+            unresolved,
+            visited,
+        ),
+        Expr::Ident(ident) => {
+            let name = ident.sym.to_string();
+            let key = (env.context.id, name.clone());
+            if !visited.insert(key) {
+                return Some(());
+            }
+            if let Some(bound) = env.context.bindings.get(&name) {
+                collect_chain_with_env(
+                    bound.as_ref(),
+                    definition,
+                    env,
+                    file_cache,
+                    unresolved,
+                    visited,
+                )
+            } else if let Some(binding) = env.context.imports.get(&name) {
+                if let Some((expr, import_env)) =
+                    resolve_import_binding(env, binding, file_cache, unresolved)
+                {
+                    collect_chain_with_env(
+                        expr.as_ref(),
+                        definition,
+                        &import_env,
+                        file_cache,
+                        unresolved,
+                        visited,
+                    )
+                } else {
+                    Some(())
+                }
+            } else {
+                Some(())
+            }
+        }
+        _ => Some(()),
+    }
+}
+
+fn analyze_module_item(item: &ModuleItem, bindings: &BindingMap) -> Option<StateDefinition> {
     match item {
         ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::Var(var_decl)))
         | ModuleItem::ModuleDecl(swc_ecma_ast::ModuleDecl::ExportDecl(
@@ -1290,7 +1781,7 @@ fn analyze_module_item<'a>(item: &'a ModuleItem, bindings: &BindingMap<'a>) -> O
     }
 }
 
-fn analyze_expression<'a>(expr: &'a Expr, bindings: &BindingMap<'a>) -> Option<StateDefinition> {
+fn analyze_expression(expr: &Expr, bindings: &BindingMap) -> Option<StateDefinition> {
     if let Expr::Call(call) = expr {
         if let Callee::Expr(callee) = &call.callee {
             if let Expr::Member(member) = &**callee {
@@ -1312,10 +1803,10 @@ fn analyze_expression<'a>(expr: &'a Expr, bindings: &BindingMap<'a>) -> Option<S
     None
 }
 
-fn collect_chain<'a>(
-    expr: &'a Expr,
+fn collect_chain(
+    expr: &Expr,
     definition: &mut StateDefinition,
-    bindings: &BindingMap<'a>,
+    bindings: &BindingMap,
     visited: &mut HashSet<String>,
 ) -> Option<()> {
     match expr {
@@ -1376,7 +1867,7 @@ fn collect_chain<'a>(
                 return Some(());
             }
             if let Some(bound) = bindings.get(&name) {
-                collect_chain(bound, definition, bindings, visited)
+                collect_chain(bound.as_ref(), definition, bindings, visited)
             } else {
                 Some(())
             }
