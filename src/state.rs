@@ -798,6 +798,24 @@ mod tests {
     }
 
     #[test]
+    fn derive_registers_properties() {
+        const DERIVE_HTML: &str = r#"
+            <div data-mf-register>
+                <script type="module">
+                    const builder = State.create()
+                        .add("count", 2)
+                        .derive("doubleCount", (store) => store.count * 2);
+                    const state = builder.build();
+                </script>
+            </div>
+        "#;
+        let (states, unresolved) = parse_states_from_document(DERIVE_HTML, None);
+        assert!(unresolved.is_empty());
+        let default = states.get("default").expect("default state");
+        assert!(default.property_type("doubleCount").is_some());
+    }
+
+    #[test]
     fn builder_split_across_modules_registers_properties() {
         let dir = tempfile::tempdir().expect("temp dir");
         let builder_js = dir.path().join("builder.js");
@@ -1720,6 +1738,27 @@ fn collect_chain_with_env(
                                 visited,
                             )
                         }
+                        "derive" => {
+                            if let Some((prop_name, span)) = call
+                                .args
+                                .first()
+                                .and_then(|arg| string_from_expr(&arg.expr))
+                            {
+                                definition.properties.push(PropertyDefinition {
+                                    name: prop_name,
+                                    ty: TypeInfo::Any,
+                                    span,
+                                });
+                            }
+                            collect_chain_with_env(
+                                &member.obj,
+                                definition,
+                                env,
+                                file_cache,
+                                unresolved,
+                                visited,
+                            )
+                        }
                         "create" => {
                             if definition.name.is_none() {
                                 if let Some(ExprOrSpread {
@@ -1874,6 +1913,20 @@ fn collect_chain(
                                 } else if let Expr::Object(obj) = prop_expr.as_ref() {
                                     collect_properties_from_object_literal(obj, definition);
                                 }
+                            }
+                            collect_chain(&member.obj, definition, bindings, visited)
+                        }
+                        "derive" => {
+                            if let Some((prop_name, span)) = call
+                                .args
+                                .first()
+                                .and_then(|arg| string_from_expr(&arg.expr))
+                            {
+                                definition.properties.push(PropertyDefinition {
+                                    name: prop_name,
+                                    ty: TypeInfo::Any,
+                                    span,
+                                });
                             }
                             collect_chain(&member.obj, definition, bindings, visited)
                         }

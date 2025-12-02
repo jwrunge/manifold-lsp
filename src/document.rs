@@ -1673,14 +1673,14 @@ impl<'a> TagScanner<'a> {
         props.insert(
             "get".to_string(),
             TypeInfo::Named(
-                "get(url: string | URL, fetchOps?: RequestInit, defaultOps?: Omit<import(\"./fetch.ts\").FetchDOMOptions, \"to\" | \"method\">): import(\"./fetch.ts\").FetchedContent"
+                "get(url: string | URL, fetchOps?: RequestInit, defaultOps?: import(\"./fetch.ts\").FetchMergeOptions): import(\"./fetch.ts\").FetchedContent"
                     .to_string(),
             ),
         );
         props.insert(
             "post".to_string(),
             TypeInfo::Named(
-                "post(url: string | URL, fetchOps?: RequestInit, defaultOps?: Omit<import(\"./fetch.ts\").FetchDOMOptions, \"to\" | \"method\">): import(\"./fetch.ts\").FetchedContent"
+                "post(url: string | URL, fetchOps?: RequestInit, defaultOps?: import(\"./fetch.ts\").FetchMergeOptions): import(\"./fetch.ts\").FetchedContent"
                     .to_string(),
             ),
         );
