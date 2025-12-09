@@ -534,4 +534,131 @@ mod tests {
             .iter()
             .any(|m| m.contains("Unknown variable") && m.contains("globalVar")));
     }
+
+    #[test]
+    fn rejects_forbidden_property_access() {
+        use super::expression::validate_expression;
+
+        // Test forbidden properties
+        let forbidden_props = vec![
+            "prototype",
+            "constructor",
+            "__proto__",
+            "apply",
+            "bind",
+            "call",
+            "__defineGetter__",
+            "__defineSetter__",
+            "__lookupGetter__",
+            "__lookupSetter__",
+        ];
+
+        for prop in forbidden_props {
+            let expr = format!("obj.{}", prop);
+            let err = validate_expression(&expr, false, false).unwrap_err();
+            assert!(
+                err.contains(&format!("Property '{}'", prop)) && err.contains("not accessible"),
+                "Expected error for {}, got: {}",
+                prop,
+                err
+            );
+
+            // Also test computed property access
+            let expr = format!("obj['{}']", prop);
+            let err = validate_expression(&expr, false, false).unwrap_err();
+            assert!(
+                err.contains(&format!("Property '{}'", prop)) && err.contains("not accessible"),
+                "Expected error for computed access of {}, got: {}",
+                prop,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_removed_safe_globals() {
+        use super::expression::validate_expression;
+
+        // These globals were removed from the safe list
+        let removed_globals = vec!["Array", "Reflect", "Symbol", "WeakMap", "WeakSet"];
+
+        for global in removed_globals {
+            let err = validate_expression(global, false, false).unwrap_err();
+            assert!(
+                err.contains(&format!("Global '{}'", global))
+                    && err.contains("no longer available"),
+                "Expected error for removed global {}, got: {}",
+                global,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn allows_new_fetch_helpers() {
+        use super::expression::validate_expression;
+
+        // These new fetch helpers should be recognized as valid globals
+        let fetch_helpers = vec![
+            "mfGet",
+            "mfPost",
+            "mfPut",
+            "mfDelete",
+            "mfPatch",
+            "mfHead",
+            "mfOptions",
+        ];
+
+        for helper in fetch_helpers {
+            let expr = format!("{}('/api/data')", helper);
+            assert!(
+                validate_expression(&expr, false, false).is_ok(),
+                "Fetch helper {} should be recognized as a valid global",
+                helper
+            );
+        }
+
+        // Test chaining methods on fetch helpers
+        assert!(validate_expression(
+            "mfGet('/api/data').replace('#content', { from: '#payload' })",
+            false,
+            false
+        )
+        .is_ok());
+
+        assert!(validate_expression(
+            "mfPost('/api/save', { body: JSON.stringify(data) }).append('#results')",
+            false,
+            false
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn allows_remaining_safe_globals() {
+        use super::expression::validate_expression;
+
+        // These globals should still be safe
+        let safe_globals = vec![
+            "Boolean", "console", "Date", "JSON", "Map", "Math", "Number", "Object", "Promise",
+            "Set", "String",
+        ];
+
+        for global in safe_globals {
+            assert!(
+                validate_expression(global, false, false).is_ok(),
+                "Safe global {} should be allowed",
+                global
+            );
+        }
+
+        // Test using them in expressions
+        assert!(validate_expression("Math.max(1, 2)", false, false).is_ok());
+        assert!(validate_expression("JSON.stringify(obj)", false, false).is_ok());
+        assert!(validate_expression("Date.now()", false, false).is_ok());
+        assert!(validate_expression("console.log('test')", false, false).is_ok());
+        assert!(validate_expression("new Map()", false, false).is_ok());
+        assert!(validate_expression("new Set()", false, false).is_ok());
+        assert!(validate_expression("Promise.resolve(value)", false, false).is_ok());
+    }
 }

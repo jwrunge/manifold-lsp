@@ -448,6 +448,10 @@ fn check_expr(expr: &Expr, restrictions: &Restrictions) -> Result<(), String> {
             if let ast::MemberProp::Computed(comp) = &member.prop {
                 check_expr(&comp.expr, restrictions)?;
             }
+            // Check for forbidden property access
+            if let Some(forbidden_error) = check_for_forbidden_property(member) {
+                return Err(forbidden_error);
+            }
             // Check for global access patterns
             if let Some(global_error) = check_for_global_access(member) {
                 return Err(global_error);
@@ -794,8 +798,7 @@ fn validate_identifier_reference(
 fn is_safe_global(name: &str) -> bool {
     matches!(
         name,
-        "Array"
-            | "Boolean"
+        "Boolean"
             | "console"
             | "Date"
             | "JSON"
@@ -804,12 +807,8 @@ fn is_safe_global(name: &str) -> bool {
             | "Number"
             | "Object"
             | "Promise"
-            | "Reflect"
             | "Set"
             | "String"
-            | "Symbol"
-            | "WeakMap"
-            | "WeakSet"
     )
 }
 
@@ -835,6 +834,13 @@ fn is_known_global(name: &str) -> bool {
             | "null"
             | "true"
             | "false"
+            | "mfGet"
+            | "mfPost"
+            | "mfPut"
+            | "mfDelete"
+            | "mfPatch"
+            | "mfHead"
+            | "mfOptions"
     ) || is_safe_global(name)
 }
 
@@ -857,6 +863,49 @@ fn check_opt_chain(opt: &ast::OptChainExpr, restrictions: &Restrictions) -> Resu
             Ok(())
         }
     }
+}
+
+fn is_forbidden_property(name: &str) -> bool {
+    matches!(
+        name,
+        "apply"
+            | "bind"
+            | "call"
+            | "constructor"
+            | "__proto__"
+            | "prototype"
+            | "__defineGetter__"
+            | "__defineSetter__"
+            | "__lookupGetter__"
+            | "__lookupSetter__"
+    )
+}
+
+fn check_for_forbidden_property(member: &ast::MemberExpr) -> Option<String> {
+    // Check if accessing a forbidden property
+    match &member.prop {
+        ast::MemberProp::Ident(ident) => {
+            let prop_name = ident.sym.as_str();
+            if is_forbidden_property(prop_name) {
+                return Some(format!(
+                    "Property '{prop_name}' is not accessible in Manifold expressions for security reasons. Define this logic in your Manifold state functions instead."
+                ));
+            }
+        }
+        ast::MemberProp::Computed(comp) => {
+            // Check if it's a string literal accessing a forbidden property
+            if let ast::Expr::Lit(ast::Lit::Str(s)) = &*comp.expr {
+                let prop_name = s.value.as_str();
+                if is_forbidden_property(prop_name) {
+                    return Some(format!(
+                        "Property '{prop_name}' is not accessible in Manifold expressions for security reasons. Define this logic in your Manifold state functions instead."
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 fn check_for_global_access(member: &ast::MemberExpr) -> Option<String> {
@@ -893,15 +942,30 @@ fn check_for_global_access(member: &ast::MemberExpr) -> Option<String> {
 
 fn check_for_global_identifier(ident: &ast::Ident) -> Option<String> {
     let name = ident.sym.as_str();
+
+    // Allow safe globals
     if is_safe_global(name) {
         return None;
     }
+
+    // Allow known fetch helpers
+    if matches!(
+        name,
+        "mfGet" | "mfPost" | "mfPut" | "mfDelete" | "mfPatch" | "mfHead" | "mfOptions"
+    ) {
+        return None;
+    }
+
+    // Allow specific other known globals
     match name {
-        "window" | "document" | "JSON" |
-        "localStorage" | "sessionStorage" | "fetch" | "setTimeout" | 
-        "setInterval" | "clearTimeout" | "clearInterval" | "alert" | 
-        "confirm" | "prompt" | "RegExp" | "Error" => {
+        "window" | "document" | "localStorage" | "sessionStorage" | "fetch" 
+        | "setTimeout" | "setInterval" | "clearTimeout" | "clearInterval" 
+        | "alert" | "confirm" | "prompt" | "RegExp" | "Error" => {
             Some(format!("Global '{name}' is not available in Manifold expressions. Define this functionality in your Manifold state functions instead."))
+        }
+        // Explicitly reject removed globals
+        "Array" | "Reflect" | "Symbol" | "WeakMap" | "WeakSet" => {
+            Some(format!("Global '{name}' is no longer available in Manifold expressions for security reasons. Define this functionality in your Manifold state functions instead."))
         }
         _ => None
     }
