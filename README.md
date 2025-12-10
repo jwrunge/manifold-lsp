@@ -11,6 +11,44 @@ A Language Server Protocol (LSP) implementation for the Manifold HTML framework,
 -   **Error Detection**: Real-time error reporting for invalid Manifold syntax
 -   **Go-to Definition**: Navigate to variable and function definitions
 -   **Hover Information**: Contextual information for Manifold elements
+-   **File Pattern Filtering**: Configure which files the LSP should process using include/exclude glob patterns
+
+## Configuration
+
+### VS Code
+
+The Manifold Language Server can be configured through VS Code settings. Access these via `Preferences > Settings` and search for "Manifold".
+
+#### File Pattern Configuration
+
+Control which files the language server processes using glob patterns:
+
+-   **Include Patterns** (`manifoldLanguageServer.files.include`): Specify which files should be processed
+    -   Default: `["**/*.html", "**/*.htm"]`
+    -   Examples: `["**/*.astro", "**/*.html", "**/*.svelte"]`
+-   **Exclude Patterns** (`manifoldLanguageServer.files.exclude`): Specify which files should be ignored
+    -   Default: `["**/*.md", "**/node_modules/**", "**/.git/**"]`
+    -   Exclude patterns take precedence over include patterns
+
+**Example configuration** (in `settings.json`):
+
+```json
+{
+	"manifoldLanguageServer.files.include": ["**/*.html", "**/*.astro"],
+	"manifoldLanguageServer.files.exclude": [
+		"**/*.md",
+		"**/node_modules/**",
+		"**/.git/**",
+		"**/dist/**"
+	]
+}
+```
+
+This allows you to:
+
+-   Enable Manifold in `.astro` files: Add `"**/*.astro"` to include patterns
+-   Disable Manifold in `.md` files: Add `"**/*.md"` to exclude patterns (already default)
+-   Exclude build directories: Add patterns like `"**/dist/**"` or `"**/build/**"`
 
 ## JetBrains IDE support
 

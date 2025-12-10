@@ -123,6 +123,24 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Automatically request Manifold-aware completions when typing '.', '${', or attribute quotes."
+				},
+				"manifoldLanguageServer.files.include": {
+					"scope": "resource",
+					"type": "array",
+					"default": ["**/*.html", "**/*.htm"],
+					"description": "File glob patterns to include for Manifold language server processing. Examples: '**/*.astro', '**/*.html', '**/*.svelte'",
+					"items": {
+						"type": "string"
+					}
+				},
+				"manifoldLanguageServer.files.exclude": {
+					"scope": "resource",
+					"type": "array",
+					"default": ["**/*.md", "**/node_modules/**", "**/.git/**"],
+					"description": "File glob patterns to exclude from Manifold language server processing. These patterns take precedence over include patterns.",
+					"items": {
+						"type": "string"
+					}
 				}
 			}
 		}

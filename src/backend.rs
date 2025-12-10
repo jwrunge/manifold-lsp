@@ -1,5 +1,6 @@
 use crate::expression::{parse_expression, ExpressionTokenKind};
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use tower_lsp::{
@@ -7,15 +8,16 @@ use tower_lsp::{
     jsonrpc::Error,
     lsp_types::{
         CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse,
-        DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
-        Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams,
-        InitializeResult, InlayHint, InlayHintParams, Location, MarkupContent, MarkupKind,
-        MessageType, Position as LspPosition, Range as LspRange, ReferenceParams, SemanticToken,
-        SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-        SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-        SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentContentChangeEvent,
-        TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+        DidChangeConfigurationParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+        DidOpenTextDocumentParams, ExecuteCommandOptions, ExecuteCommandParams,
+        GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+        HoverProviderCapability, InitializeParams, InitializeResult, InlayHint, InlayHintParams,
+        Location, MarkupContent, MarkupKind, MessageType, Position as LspPosition,
+        Range as LspRange, ReferenceParams, SemanticToken, SemanticTokenType, SemanticTokens,
+        SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+        SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+        ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+        TextDocumentSyncKind, Url, WorkDoneProgressOptions,
     },
     Client, LanguageServer,
 };
@@ -24,6 +26,138 @@ use super::attribute::{ManifoldAttribute, ManifoldAttributeKind};
 use super::document::{DocumentSemanticToken, ManifoldDocument};
 use super::lineindex::LineIndex;
 use super::notification::{ManifoldNotification, NotificationParams};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifoldConfig {
+    #[serde(default)]
+    files: FilePatterns,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FilePatterns {
+    #[serde(default = "default_include_patterns")]
+    include: Vec<String>,
+    #[serde(default = "default_exclude_patterns")]
+    exclude: Vec<String>,
+}
+
+impl Default for FilePatterns {
+    fn default() -> Self {
+        Self {
+            include: default_include_patterns(),
+            exclude: default_exclude_patterns(),
+        }
+    }
+}
+
+fn default_include_patterns() -> Vec<String> {
+    vec!["**/*.html".to_string(), "**/*.htm".to_string()]
+}
+
+fn default_exclude_patterns() -> Vec<String> {
+    vec![
+        "**/*.md".to_string(),
+        "**/node_modules/**".to_string(),
+        "**/.git/**".to_string(),
+    ]
+}
+
+/// Simple glob pattern matching for file paths
+/// Supports * (any characters except /) and ** (any characters including /)
+fn matches_glob(path: &str, pattern: &str) -> bool {
+    // Normalize path separators
+    let path = path.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+
+    // Convert glob pattern to regex-like matching
+    let pattern_parts: Vec<&str> = pattern.split('/').collect();
+    let path_parts: Vec<&str> = path.split('/').collect();
+
+    matches_glob_parts(&path_parts, &pattern_parts)
+}
+
+fn matches_glob_parts(path_parts: &[&str], pattern_parts: &[&str]) -> bool {
+    if pattern_parts.is_empty() {
+        return path_parts.is_empty();
+    }
+
+    if path_parts.is_empty() {
+        return pattern_parts.iter().all(|p| *p == "**");
+    }
+
+    let pattern_head = pattern_parts[0];
+
+    match pattern_head {
+        "**" => {
+            // ** can match zero or more path segments
+            if pattern_parts.len() == 1 {
+                // ** at the end matches everything
+                return true;
+            }
+
+            // Try matching without consuming the ** (** matches zero segments)
+            if matches_glob_parts(path_parts, &pattern_parts[1..]) {
+                return true;
+            }
+
+            // Try matching with consuming one path segment (** matches one or more)
+            matches_glob_parts(&path_parts[1..], pattern_parts)
+        }
+        _ => {
+            let path_head = path_parts[0];
+            // Match single segment with * support
+            if matches_segment(path_head, pattern_head) {
+                matches_glob_parts(&path_parts[1..], &pattern_parts[1..])
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn matches_segment(segment: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+
+    if !pattern.contains('*') {
+        return segment == pattern;
+    }
+
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut pos = 0;
+
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+
+        if i == 0 {
+            // First part must match at start
+            if !segment.starts_with(part) {
+                return false;
+            }
+            pos = part.len();
+        } else if i == parts.len() - 1 {
+            // Last part must match at end
+            if !segment.ends_with(part) {
+                return false;
+            }
+            if pos > segment.len() - part.len() {
+                return false;
+            }
+        } else {
+            // Middle parts must be found in order
+            if let Some(found) = segment[pos..].find(part) {
+                pos += found + part.len();
+            } else {
+                return false;
+            }
+        }
+    }
+
+    true
+}
 
 const SEMANTIC_TOKEN_TYPES: [SemanticTokenType; 5] = [
     SemanticTokenType::KEYWORD,
@@ -142,6 +276,7 @@ impl StoredDocument {
 pub struct Backend {
     client: Client,
     documents: DashMap<Url, StoredDocument>,
+    config: std::sync::RwLock<ManifoldConfig>,
 }
 
 impl Backend {
@@ -149,7 +284,34 @@ impl Backend {
         Self {
             client,
             documents: DashMap::new(),
+            config: std::sync::RwLock::new(ManifoldConfig::default()),
         }
+    }
+
+    fn should_process_file(&self, uri: &Url) -> bool {
+        let Some(path) = uri.to_file_path().ok() else {
+            return true; // Process non-file URIs by default
+        };
+
+        let path_str = path.to_string_lossy();
+        let config = self.config.read().unwrap();
+
+        // Check exclude patterns first (they take precedence)
+        for pattern in &config.files.exclude {
+            if matches_glob(&path_str, pattern) {
+                return false;
+            }
+        }
+
+        // Then check include patterns
+        for pattern in &config.files.include {
+            if matches_glob(&path_str, pattern) {
+                return true;
+            }
+        }
+
+        // If no patterns match, default to false
+        false
     }
 
     pub fn update_document(&self, uri: Url, text: String) {
@@ -510,6 +672,12 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
+
+        // Check if file should be processed based on patterns
+        if !self.should_process_file(&uri) {
+            return;
+        }
+
         self.update_document(uri.clone(), params.text_document.text);
         self.refresh_diagnostics(uri).await;
     }
@@ -521,6 +689,11 @@ impl LanguageServer for Backend {
         } = params;
 
         let uri = text_document.uri;
+
+        // Check if file should be processed based on patterns
+        if !self.should_process_file(&uri) {
+            return;
+        }
 
         if let Some(mut document) = self.documents.get_mut(&uri) {
             document.apply_content_changes(content_changes);
@@ -551,6 +724,39 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         self.remove_document(&uri);
         self.client.publish_diagnostics(uri, vec![], None).await;
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        // Extract the Manifold-specific configuration
+        if let Some(settings) = params.settings.as_object() {
+            if let Some(manifold_settings) = settings.get("manifoldLanguageServer") {
+                match serde_json::from_value::<ManifoldConfig>(manifold_settings.clone()) {
+                    Ok(config) => {
+                        {
+                            let mut current_config = self.config.write().unwrap();
+                            *current_config = config;
+                        } // Drop the write guard here
+
+                        let _ = self
+                            .client
+                            .log_message(
+                                MessageType::INFO,
+                                "Manifold LSP configuration updated successfully",
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = self
+                            .client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("Failed to parse Manifold configuration: {e}"),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, Error> {
@@ -668,5 +874,61 @@ impl LanguageServer for Backend {
         } else {
             Err(Error::invalid_request())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_glob_matching() {
+        // Basic exact matches
+        assert!(matches_glob("foo.html", "foo.html"));
+        assert!(!matches_glob("bar.html", "foo.html"));
+
+        // Single wildcard
+        assert!(matches_glob("file.html", "*.html"));
+        assert!(matches_glob("index.html", "*.html"));
+        assert!(!matches_glob("file.md", "*.html"));
+
+        // Directory wildcards
+        assert!(matches_glob("src/file.html", "**/*.html"));
+        assert!(matches_glob("a/b/c/file.html", "**/*.html"));
+        assert!(matches_glob("file.html", "**/*.html"));
+
+        // Specific directory patterns
+        assert!(matches_glob(
+            "node_modules/lib/file.js",
+            "**/node_modules/**"
+        ));
+        assert!(matches_glob(
+            "src/node_modules/file.js",
+            "**/node_modules/**"
+        ));
+        assert!(!matches_glob("src/file.js", "**/node_modules/**"));
+
+        // Extension patterns
+        assert!(matches_glob("file.md", "**/*.md"));
+        assert!(matches_glob("docs/readme.md", "**/*.md"));
+        assert!(!matches_glob("file.html", "**/*.md"));
+
+        // Multiple extensions
+        assert!(matches_glob("file.astro", "**/*.astro"));
+        assert!(matches_glob("src/components/Button.astro", "**/*.astro"));
+
+        // Path with mixed separators (should normalize)
+        assert!(matches_glob("src/file.html", "src/*.html"));
+        assert!(matches_glob("src/nested/file.html", "src/**/*.html"));
+    }
+
+    #[test]
+    fn test_segment_matching() {
+        assert!(matches_segment("file", "file"));
+        assert!(matches_segment("file", "*"));
+        assert!(matches_segment("file.html", "*.html"));
+        assert!(matches_segment("test.html", "*.html"));
+        assert!(matches_segment("index.html", "index.*"));
+        assert!(!matches_segment("file.md", "*.html"));
     }
 }
