@@ -554,23 +554,19 @@ mod tests {
         ];
 
         for prop in forbidden_props {
-            let expr = format!("obj.{}", prop);
+            let expr = format!("obj.{prop}");
             let err = validate_expression(&expr, false, false).unwrap_err();
             assert!(
-                err.contains(&format!("Property '{}'", prop)) && err.contains("not accessible"),
-                "Expected error for {}, got: {}",
-                prop,
-                err
+                err.contains(&format!("Property '{prop}'")) && err.contains("not accessible"),
+                "Expected error for {prop}, got: {err}"
             );
 
             // Also test computed property access
-            let expr = format!("obj['{}']", prop);
+            let expr = format!("obj['{prop}']");
             let err = validate_expression(&expr, false, false).unwrap_err();
             assert!(
-                err.contains(&format!("Property '{}'", prop)) && err.contains("not accessible"),
-                "Expected error for computed access of {}, got: {}",
-                prop,
-                err
+                err.contains(&format!("Property '{prop}'")) && err.contains("not accessible"),
+                "Expected error for computed access of {prop}, got: {err}"
             );
         }
     }
@@ -585,11 +581,8 @@ mod tests {
         for global in removed_globals {
             let err = validate_expression(global, false, false).unwrap_err();
             assert!(
-                err.contains(&format!("Global '{}'", global))
-                    && err.contains("no longer available"),
-                "Expected error for removed global {}, got: {}",
-                global,
-                err
+                err.contains(&format!("Global '{global}'")) && err.contains("no longer available"),
+                "Expected error for removed global {global}, got: {err}"
             );
         }
     }
@@ -610,11 +603,10 @@ mod tests {
         ];
 
         for helper in fetch_helpers {
-            let expr = format!("{}('/api/data')", helper);
+            let expr = format!("{helper}('/api/data')");
             assert!(
                 validate_expression(&expr, false, false).is_ok(),
-                "Fetch helper {} should be recognized as a valid global",
-                helper
+                "Fetch helper {helper} should be recognized as a valid global"
             );
         }
 
@@ -647,8 +639,7 @@ mod tests {
         for global in safe_globals {
             assert!(
                 validate_expression(global, false, false).is_ok(),
-                "Safe global {} should be allowed",
-                global
+                "Safe global {global} should be allowed"
             );
         }
 
